@@ -126,13 +126,13 @@ The shared control kit (ADR-0014 §3) used throughout the Settings and RWW Conso
 The canonical visual reference is [`docs/design-system.md`](docs/design-system.md). It consolidates role-based colour (ADR-0012), card/surface patterns, the **instrument kit**, and three **asset classes**: **DisplayKit tile sprites** (hub glyph PNG/GIF pairs), **theme-aware bitmaps** (Reader playback dark/light PNG pairs via `ReaderButtonIcon`), and **chrome icons** (single-ink SVG via `ChromeIcon`, `fill="currentColor"`). Card **faces** use theme-aware background PNGs (`--hub-tile-face`, `--settings-tile-face`). Static setting explanations use **`SettingHintTrigger`** (`?` tooltip) on **`SettingsLabel`**. Protected brand surfaces (splash, hub badge, idle dove, Return vs Home dove) are listed in the design-system doc §8.
 
 ### DisplayKit tile sprite
-A hub-tile glyph asset pair (`idle` PNG + optional `hover` PNG/GIF) with fixed palette baked into the art. Lives under `assets/hub-tiles/`. Theme-agnostic — the same file renders in light and dark. Spec: `Refernces/Design Overhaul/01-hub-tiles.md`.
+A hub-tile glyph asset pair (`idle` PNG + optional `hover` PNG/GIF) with fixed palette baked into the art. Lives under `assets/hub-tiles/`. Theme-agnostic — the same file renders in light and dark. Spec: `design/Design Overhaul/01-hub-tiles.md`.
 
 ### Card face
 The theme-aware background PNG on hub tiles (`.hub-tile`) and Settings gateway cards (`.gsc-card`). CSS tokens `--hub-tile-face` / `--settings-tile-face` swap per theme; `--hub-tile` remains the fallback fill colour under the art.
 
 ### Chrome icon
-A single-ink SVG control glyph drawn at 24×24, recoloured by CSS via `currentColor`. Used on Settings landing cards and future nav/reader chrome replacements. Component: `components/icons/ChromeIcon.tsx`. Spec: `Refernces/Design Overhaul/02-chrome-icons.md`.
+A single-ink SVG control glyph drawn at 24×24, recoloured by CSS via `currentColor`. Used on Settings landing cards and future nav/reader chrome replacements. Component: `components/icons/ChromeIcon.tsx`. Spec: `design/Design Overhaul/02-chrome-icons.md`.
 
 ### Setting hint trigger
 The circled **`?`** control on a settings row label that reveals static explain copy on hover or focus (`SettingHintTrigger`). Live readouts and validation stay always visible in the label's feedback slot (`SettingsLabel`).
