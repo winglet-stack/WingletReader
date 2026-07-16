@@ -1,0 +1,62 @@
+# Release pipeline for public v* tags.
+#
+# Required repository secret:
+# - RELEASES_TOKEN: fine-grained GitHub PAT with Contents: read/write on
+#   winglet-stack/WingletReader-Releases only. It is mapped to GH_TOKEN for
+#   electron-builder's GitHub publisher.
+#
+# Public alpha releases are prereleases. The workflow also sets EP_PRE_RELEASE
+# so electron-builder marks v*-alpha.N GitHub Releases as prerelease and uploads
+# latest.yml for electron-updater.
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build Windows installer
+    runs-on: windows-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Test
+        run: npm test
+
+      - name: Build installer dry run
+        if: github.event_name == 'workflow_dispatch'
+        run: npm run dist:win -- --publish never
+
+      - name: Build and publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+          EP_PRE_RELEASE: 'true'
+        run: npm run dist:win -- --publish always
+
+      - name: Upload dry-run installer artifacts
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: wingletreader-windows-dry-run
+          path: |
+            dist/*.exe
+            dist/latest.yml
+            dist/*.blockmap
+          if-no-files-found: error

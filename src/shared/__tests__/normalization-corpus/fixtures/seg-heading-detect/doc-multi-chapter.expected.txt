@@ -1,0 +1,5 @@
+detected_heading | 4
+0 | "Introduction" | 35
+1 | "Chapter One" | 35
+2 | "Chapter Two" | 37
+3 | "Chapter Three" | 36

@@ -1,0 +1,88 @@
+{
+  "name": "wingletreader",
+  "version": "0.2.0-alpha.1",
+  "description": "Local-first speed-reading application",
+  "main": "./out/main/index.js",
+  "engines": {
+    "node": ">=24 <25",
+    "npm": ">=11"
+  },
+  "scripts": {
+    "dev": "electron-vite dev",
+    "prebuild": "git clean -fX -- src",
+    "build": "electron-vite build",
+    "dist:win": "npm run build && node scripts/generate-portable-layout.mjs && electron-builder --win nsis",
+    "dist:portable": "npm run build && electron-builder --win dir && node scripts/assemble-portable.mjs",
+    "preview": "electron-vite preview",
+    "test": "vitest run",
+    "corpus:report": "vitest run --config src/shared/__tests__/normalization-corpus/scoreboard.vitest.config.ts",
+    "backup:sync": "bash scripts/sync-backup.sh"
+  },
+  "build": {
+    "appId": "com.fasttrack.reader",
+    "productName": "WingletReader",
+    "directories": {
+      "buildResources": "resources",
+      "output": "dist"
+    },
+    "files": [
+      "out/**/*",
+      "resources/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "resources/icon.ico",
+      "artifactName": "WingletReader-${version}-Setup.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "WingletReader",
+      "include": "build/installer.nsh"
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "winglet-stack",
+        "repo": "WingletReader-Releases",
+        "releaseType": "prerelease",
+        "publishAutoUpdate": true
+      }
+    ]
+  },
+  "devDependencies": {
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.1",
+    "@types/node": "^20.11.5",
+    "@types/pdf-parse": "^1.1.4",
+    "@types/react": "^18.2.48",
+    "@types/react-dom": "^18.2.18",
+    "@vitejs/plugin-react": "^4.2.1",
+    "electron": "^43.1.1",
+    "electron-builder": "^26.15.3",
+    "electron-vite": "^2.0.0",
+    "happy-dom": "^20.9.0",
+    "typescript": "^5.3.3",
+    "vitest": "^1.6.1"
+  },
+  "dependencies": {
+    "electron-log": "^5.4.4",
+    "electron-updater": "^6.8.9",
+    "mammoth": "^1.7.1",
+    "mp4-muxer": "^5.2.2",
+    "pdf-parse": "^1.1.1",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
+  }
+}

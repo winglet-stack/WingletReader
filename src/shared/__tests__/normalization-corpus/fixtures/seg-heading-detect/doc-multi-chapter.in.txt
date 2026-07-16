@@ -1,0 +1,21 @@
+This short opening sits before the first heading and runs well past the twenty word
+threshold, so the segmenter promotes it into a leading Introduction segment ahead of the
+detected chapters that follow it below.
+
+Chapter One
+
+The first chapter carries enough prose to clear the meaningful-segment filter, which drops
+any heading whose body falls under twenty words. These two sentences together supply more
+than enough running text to keep the chapter.
+
+Chapter Two
+
+The second chapter likewise holds a comfortable amount of body text so the detector keeps
+it rather than rejecting the document as mere inline formatting. Again the word count here
+sits safely above the twenty word floor.
+
+Chapter Three
+
+A third chapter rounds out the document and proves the detector emits one segment per
+heading in order. This closing body, like the others, is written to stay above the minimum
+meaningful word count without padding.

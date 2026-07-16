@@ -1,0 +1,30 @@
+{
+  "$schema": "https://raw.githubusercontent.com/fallow-rs/fallow/main/schema.json",
+  "entry": [
+    "src/index.{ts,tsx,js,jsx}",
+    "src/main.{ts,tsx,js,jsx}",
+    // Renderer entry: index.html loads main.tsx, which the electron-vite plugin
+    // does not trace through. Declaring it explicitly stops main.tsx / index.css
+    // (and TemporaryReaderApp) from being reported as unused. See
+    // .scratch/codebase-sanitation/ — Config-hygiene issue.
+    "src/renderer/src/main.tsx"
+  ],
+  // Archived (dead-by-design) code must not tax the health score or dead-code
+  // reachability. Excluded globally per the codebase-sanitation exceptions policy.
+  "ignorePatterns": [
+    "**/_archived/**"
+  ],
+  "duplicates": {
+    // Hide pair-only clones; focus on widespread copy-paste
+    // worth refactoring. Lower to 2 to report every duplicate pair.
+    "minOccurrences": 3,
+    // Test files intentionally repeat setup/fixture scaffolding; that is not
+    // copy-paste debt. Keep duplication focused on production code.
+    "ignore": [
+      "**/__tests__/**"
+    ]
+  },
+  "rules": {
+    "unused-dependencies": "warn"
+  }
+}

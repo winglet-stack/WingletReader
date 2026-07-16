@@ -1,0 +1,66 @@
+# Dependencies
+node_modules/
+
+# Installed agent skills (reinstall from skills-lock.json)
+.agents/skills/
+.claude/skills/
+
+# Build output
+out/
+dist/
+dist-electron/
+*.tsbuildinfo
+
+# TypeScript emit next to source (composite tsconfig, no outDir).
+# Edit the .ts/.tsx source; these .js/.d.ts are regenerated artifacts.
+src/**/*.js
+src/**/*.d.ts
+!src/renderer/src/env.d.ts
+electron.vite.config.js
+electron.vite.config.d.ts
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# Env
+.env
+.env.local
+.env.*.local
+.fallow/
+
+# Backup sync (scripts/sync-backup.sh) log
+scripts/backup-sync.log
+
+# Internal agent issue-tracker / working notes (kept local, not shipped)
+.scratch/
+
+# Agent workflow + internal ops/process material — kept local, excluded from the
+# public repo. Holds the agent guardrail docs, the volatile work-state handoff,
+# alpha ops runbooks, the website-export process, and issue templates.
+.internal/
+CLAUDE.md
+AGENTS.md
+
+# Design source material (kept local; not imported by the app — see resources/ for shipped assets)
+/Refernce Images/
+/Labels and Sprites/
+
+# Stray build/log artifacts
+esbuild_err.txt
+new-logo.png.png
+
+# Generated portable-layout artifacts for the installer "Portable to USB" mode
+# (rendered from scripts/portable-layout.mjs by scripts/generate-portable-layout.mjs).
+# build/installer.nsh itself is hand-authored source and IS tracked.
+/build/portable-layout/

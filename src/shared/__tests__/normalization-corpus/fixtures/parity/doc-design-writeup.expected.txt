@@ -1,0 +1,17 @@
+Soft Skills for Hard Problems
+
+Most engineers assume that the hardest part of
+building software is the code itself. In
+practice, the harder problem is communication: making sure that every person on the
+team shares the same mental model of the
+system.
+
+When a team writes things down, two things
+happen. The shared document becomes a single
+point of refer
+ence, and disagreements surface
+early, while they are still cheap to fix.
+
+So the advice is simple, even if it is hard to
+follow: write the design down before you write
+the code.

@@ -1,0 +1,8 @@
+He paused
+- then walked on without another word.
+
+This is the GUARD case. The line above starts with "- " but the preceding
+line is ordinary prose (it does not end in a colon), so it is a prose dash,
+NOT a bullet. It must FLATTEN into the previous line, exactly as before:
+
+He paused - then walked on without another word.

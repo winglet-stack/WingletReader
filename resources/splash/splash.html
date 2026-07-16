@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+* { margin: 0; padding: 0; }
+html, body { width: 216px; height: 216px; overflow: hidden; background: #11111100; }
+canvas { display: block; }
+</style>
+</head>
+<body>
+<canvas id="c" width="216" height="216"></canvas>
+<script>
+var INTRO_FRAMES = 22;
+var LOOP_FRAMES = 33;
+var INTERVAL = 1000 / 15;
+var c = document.getElementById('c');
+var ctx = c.getContext('2d');
+var intro = new Image();
+var loop = new Image();
+var loaded = 0;
+var phase = 'intro', frame = 0, lastTs = null;
+
+function draw() {
+  ctx.drawImage(phase === 'intro' ? intro : loop, frame * 432, 0, 432, 432, 0, 0, 216, 216);
+}
+
+function advance() {
+  frame++;
+  if (phase === 'intro' && frame >= INTRO_FRAMES) { phase = 'loop'; frame = 0; }
+  else if (phase === 'loop' && frame >= LOOP_FRAMES) { frame = 0; }
+}
+
+function tick(ts) {
+  requestAnimationFrame(tick);
+  if (lastTs === null) { lastTs = ts; draw(); return; }
+  if (ts - lastTs < INTERVAL) return;
+  lastTs += INTERVAL;
+  if (ts - lastTs > INTERVAL) lastTs = ts;
+  advance();
+  draw();
+}
+
+function onLoad() {
+  if (++loaded === 2) requestAnimationFrame(tick);
+}
+
+intro.onload = onLoad;
+loop.onload = onLoad;
+intro.src = './BootAnimationInitial.png';
+loop.src = './BootAnimationLoop.png';
+</script>
+</body>
+</html>

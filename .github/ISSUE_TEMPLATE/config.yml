@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 💡 Ideas & feature recommendations
+    url: https://github.com/winglet-stack/WingletReader/discussions/categories/ideas
+    about: Suggest a feature or share an idea. Recommendations live in Discussions, not Issues.
+  - name: 🙋 Questions & help
+    url: https://github.com/winglet-stack/WingletReader/discussions/categories/q-a
+    about: Ask how something works or get help using the app.
+  - name: 🔒 Report a security vulnerability
+    url: https://github.com/winglet-stack/WingletReader/security/advisories/new
+    about: Please report security issues privately — never as a public issue.

@@ -1,0 +1,66 @@
+{
+  "schemaVersion": 1,
+  "bundleVersion": 1,
+  "categories": [
+    { "name": "Fiction" },
+    { "name": "Essays" }
+  ],
+  "books": [
+    {
+      "seedId": "the-lighthouse-keeper",
+      "title": "The Lighthouse Keeper",
+      "content": "The lamp had not been lit for three nights, and old Maren felt the silence\npress against the glass like a tide. She climbed the spiral stair with the\noil can knocking at her knee, counting the steps she had counted ten thousand\ntimes before the storms took her hearing.\n\nOn the fourth night a green flare cut the fog above the reef. Maren answered\nwith two long flashes and one short, the old wartime code, and waited to see\nwhether anyone still living remembered how to read the dark.",
+      "categoryRef": "Fiction",
+      "segments": [
+        {
+          "title": "The Wreck",
+          "order": 0,
+          "content": "The lamp had not been lit for three nights, and old Maren felt the silence\npress against the glass like a tide. She climbed the spiral stair with the\noil can knocking at her knee, counting the steps she had counted ten thousand\ntimes before the storms took her hearing.",
+          "word_count": 50,
+          "startWordOffset": 0,
+          "endWordOffset": 50
+        },
+        {
+          "title": "The Signal",
+          "order": 1,
+          "content": "On the fourth night a green flare cut the fog above the reef. Maren answered\nwith two long flashes and one short, the old wartime code, and waited to see\nwhether anyone still living remembered how to read the dark.",
+          "word_count": 40,
+          "startWordOffset": 50,
+          "endWordOffset": 90
+        }
+      ]
+    },
+    {
+      "seedId": "on-reading-fast",
+      "title": "On Reading Fast",
+      "content": "Most people read at the pace they learned to speak, sounding each word in the\nthroat even when the page is silent. This book is about letting that habit go.\n\nThe inner voice is a comfortable bottleneck. It caps you near speaking speed,\na few hundred words a minute, long after your eyes could move faster.\n\nWiden the span. Let groups of words land at once, trust the periphery, and\nresist the pull back to the safe, slow line you already understood.",
+      "categoryRef": "Essays",
+      "segments": [
+        {
+          "title": "Introduction",
+          "order": 0,
+          "content": "Most people read at the pace they learned to speak, sounding each word in the\nthroat even when the page is silent. This book is about letting that habit go.",
+          "word_count": 30,
+          "startWordOffset": 0,
+          "endWordOffset": 30
+        },
+        {
+          "title": "Why Subvocalization Slows You",
+          "order": 1,
+          "content": "The inner voice is a comfortable bottleneck. It caps you near speaking speed,\na few hundred words a minute, long after your eyes could move faster.",
+          "word_count": 26,
+          "startWordOffset": 30,
+          "endWordOffset": 56
+        },
+        {
+          "title": "Training the Eye",
+          "order": 2,
+          "content": "Widen the span. Let groups of words land at once, trust the periphery, and\nresist the pull back to the safe, slow line you already understood.",
+          "word_count": 26,
+          "startWordOffset": 56,
+          "endWordOffset": 82
+        }
+      ]
+    }
+  ]
+}

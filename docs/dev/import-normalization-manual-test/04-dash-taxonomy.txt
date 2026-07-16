@@ -1,0 +1,11 @@
+A note on dashes in this paragraph.
+
+The co−operative was founded on a simple idea. (The dash in "co−operative"
+is a stray MINUS SIGN, U+2212, and should normalize to an ordinary hyphen.)
+
+Wait--stop there for a moment. (The typed double hyphen "--" should become a
+real em dash.)
+
+These should all be LEFT ALONE: the meeting ran 10–20 minutes (en dash range),
+a strong sense of well-being (real hyphen compound), and she paused — then
+continued (an existing, correctly spaced em dash).
