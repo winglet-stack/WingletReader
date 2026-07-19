@@ -7,7 +7,10 @@ Turn any text into a rhythmic, adjustable word-stream — and keep every byte of
 
 `Electron` · `React` · `TypeScript` · **Early alpha — v0.2.0-alpha.1**
 
-![WingletReader hub](docs/screenshots/hub.png)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/hub-dark.png">
+  <img alt="WingletReader hub" src="docs/screenshots/hub-light.png" width="820">
+</picture>
 
 </div>
 
@@ -67,6 +70,35 @@ reading styles, and read with a steadier rhythm.
 ![Reading in progress](docs/screenshots/reader-playing.png)
 
 *Playback in progress — multiple Stacks visible at once, active group highlighted.*
+
+</div>
+
+## Screenshots
+
+<div align="center">
+
+<sub><em>WingletReader ships light and dark — the shots below follow your GitHub theme.</em></sub>
+
+<table>
+<tr>
+<td width="50%" align="center" valign="top">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/library-dark.png">
+    <img alt="Library" src="docs/screenshots/library-light.png" width="100%">
+  </picture>
+  <br>
+  <sub><b>Library</b> — your texts, sorted into categories, searchable.</sub>
+</td>
+<td width="50%" align="center" valign="top">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/reader-idle-dark.png">
+    <img alt="Reader, ready to read" src="docs/screenshots/reader-idle-light.png" width="100%">
+  </picture>
+  <br>
+  <sub><b>Reader</b> — a session ready to go, saved position remembered.</sub>
+</td>
+</tr>
+</table>
 
 </div>
 
@@ -138,12 +170,12 @@ colour **Palettes** keep configurations you like.
 - **Frozen back-compat identifiers.** A handful of legacy `fasttrack` identifiers
   (the data filename, app id, storage keys) are deliberately *frozen* so existing
   users' data never orphans — documented as invariants in [`CONTEXT.md`](CONTEXT.md).
-- **Decisions are recorded.** [28 Architecture Decision Records](docs/adr) trace
+- **Decisions are recorded.** [31 Architecture Decision Records](docs/adr) trace
   the reasoning behind the data layer, the settings model, the hub, the design
   system, bookmarks, the session model, and more.
 - **A real design system, and tested.** One vanilla `index.css`, role-based
   colour, and hand-drawn pixel-art sprites ([`docs/design-system.md`](docs/design-system.md));
-  ~90 Vitest files, including a normalization conformance corpus for the import
+  94 Vitest files, including a normalization conformance corpus for the import
   pipeline.
 
 ## Architecture
