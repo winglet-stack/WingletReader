@@ -297,7 +297,7 @@ in [ROADMAP.md](ROADMAP.md).
 | Make Video (MP4 export) | ✅ Active |
 | Portable USB mode | ✅ Shipped |
 | Windows installer + auto-update | ✅ Shipped |
-| Overlay Reader (read-while-working) | 🚧 Active, in development |
+| Overlay Reader  | 🚧 Active, in development |
 | Post-reading summary flow | 🔒 Built, disabled for alpha v1 |
 | In-app feedback sender | ⏳ Planned |
 | Curated pre-formatted book bundle | ⏳ Planned |
