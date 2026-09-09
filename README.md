@@ -27,7 +27,7 @@ Turn any text into a rhythmic, adjustable word-stream — and keep every byte of
 
 WingletReader ships as a **Windows installer**.
 
-### ➜ [**Download the latest release**](https://github.com/winglet-stack/WingletReader-Releases/releases/latest)
+### ➜ [**Download the latest release**](https://github.com/winglet-stack/WingletReader-Releases/releases)
 
 The app auto-updates from then on, checking for new alpha builds on startup.
 
