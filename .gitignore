@@ -45,6 +45,12 @@ scripts/backup-sync.log
 # Internal agent issue-tracker / working notes (kept local, not shipped)
 .scratch/
 
+# Motion-graphics project. NOT part of the app: this is a git worktree of the
+# `promo` branch, an orphan branch (no shared history with master) that exists on
+# `origin` only. Ignored here so the worktree never lands in a master commit and
+# therefore can never reach a public snapshot. Work on it with `cd promo`.
+/promo/
+
 # Agent workflow + internal ops/process material — kept local, excluded from the
 # public repo. Holds the agent guardrail docs, the volatile work-state handoff,
 # alpha ops runbooks, the website-export process, and issue templates.

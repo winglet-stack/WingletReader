@@ -64,3 +64,25 @@ Cut **`WingletReader 0.2.0-alpha.1`** as the first official public alpha: reprod
 - **Positive:** authoritative, reproducible snapshot; no proprietary-font exposure; supported runtime; graceful failure + crash logs for tester feedback; one canonical look; clean public jump-start with a real feedback channel.
 - **Costs / follow-ups:** existing private testers on a would-be new `appId` are unaffected (identity frozen → in-place upgrade). A **deferred full-rename migration** is now owed (own ADR + slice). Electron upgrade may surface breakage → fallback path defined. Unsigned installer → SmartScreen friction, documented. `pdf-parse@1.1.1` is ancient/unmaintained — noted, replacement deferred (touches the import path + tests).
 - **Execution:** tracked as the drip-fed AH-1..AH-10 cascade in `.scratch/active/alpha-hardening/issues/`.
+
+## Amendment — 2026-07-16: unhandledRejection is logged, not fatal
+
+The resilience trio's item (2) decided only *"main-process `uncaughtException` / `unhandledRejection` → `electron-log` file"* — log to file. It never decided on termination. The AH-4 implementation went beyond the decision text and added `process.exit(1)` to **both** handlers. Combined with the updater's unowned detached `downloadPromise` (slice `01`), a stray rejection at startup **silently killed the app** mid-session.
+
+The trio now **logs and continues** on `unhandledRejection`, terminating only on `uncaughtException`. The asymmetry is deliberate: the JSON store is durable per-mutation (`database.ts` writes tmp-then-rename atomically on every `save()`), so fail-fast on a stray rejection protects nothing, while killing an alpha tester's session costs the feedback the alpha exists to collect. After an `uncaughtException`, main's state genuinely is unknown, so `terminate(1)` stays. This **restores** item (2)'s original intent rather than reversing it.
+
+## Amendment — 2026-08-20: release targets use ordinary SemVer precedence
+
+The first public-alpha decision froze `0.2.0` and incremented only `alpha.N`.
+That rule served the initial hardening cycle, but it is not a permanent naming
+constraint. Starting with the next converged snapshot, release identity follows
+ordinary Semantic Versioning across every surface: package version
+`0.2.1-alpha`, tag `v0.2.1-alpha`, release title
+`WingletReader 0.2.1-alpha`, and generated installer
+`WingletReader-0.2.1-alpha-Setup.exe`.
+
+The product name is presentation, not part of the machine version. A further
+prerelease of the same `0.2.1` target appends an ordered identifier
+(`0.2.1-alpha.1`, then `.2`); advancing channel uses `beta.1` or `rc.1`, and the
+stable build removes the suffix. Published version contents remain immutable.
+The full operational convention lives in `docs/RELEASE.md`.

@@ -6,7 +6,7 @@
 #   electron-builder's GitHub publisher.
 #
 # Public alpha releases are prereleases. The workflow also sets EP_PRE_RELEASE
-# so electron-builder marks v*-alpha.N GitHub Releases as prerelease and uploads
+# so electron-builder marks v*-alpha* GitHub Releases as prerelease and uploads
 # latest.yml for electron-updater.
 name: Release
 

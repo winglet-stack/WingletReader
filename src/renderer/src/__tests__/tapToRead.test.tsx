@@ -54,7 +54,6 @@ const BASE_SETTINGS: Settings = {
   stack_vertical_offset: 0,
   theme: 'dark',
   highlight_active: false,
-  lines_enabled: false,
   lines_count: 1,
   lines_row_gap: 0,
   segmentation_enabled: false,

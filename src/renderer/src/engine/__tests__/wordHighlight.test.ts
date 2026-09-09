@@ -1,9 +1,29 @@
 import { describe, it, expect } from 'vitest'
-import {
-  buildWordPositions,
-  findWordCharRange,
-  splitContentAtWord,
-} from '../wordHighlight'
+import { scanText } from '../wordHighlight'
+import { buildTextWordIndex } from '../wordIndex'
+
+/*
+ * `buildWordPositions`, `findWordCharRange` and `splitContentAtWord` were three
+ * one-shot helpers that each re-walked the whole text. `architecture-depth/08`
+ * replaced them with the **word index**, which walks once and answers the same
+ * questions. These are call-shape adapters over that index, kept so every
+ * assertion below — the word definition this file exists to pin — stays
+ * verbatim rather than being rewritten alongside the code it guards.
+ */
+const buildWordPositions = (content: string) => scanText(content).wordPositions
+
+const findWordCharRange = (content: string, wordIndex: number) =>
+  buildTextWordIndex(content).charRangeAt(wordIndex)
+
+const splitContentAtWord = (content: string, wordIndex: number) => {
+  const range = buildTextWordIndex(content).charRangeAt(wordIndex)
+  if (!range) return null
+  return {
+    before: content.slice(0, range.start),
+    word: content.slice(range.start, range.end),
+    after: content.slice(range.end),
+  }
+}
 
 // ── buildWordPositions ─────────────────────────────────────────────────────
 
@@ -76,11 +96,23 @@ describe('buildWordPositions — markdown headline stripping', () => {
     expect(content[pos[0].start]).toBe('D')
   })
 
-  it('does NOT strip # when not followed by a space (not a headline)', () => {
+  it('strips a leading # with no space after it, exactly as the tokenizer does', () => {
+    // Changed by `architecture-depth/08`. This walk used to keep the hash here
+    // while `tokenizeParagraph` stripped it, so the reader played `notAHeadline`
+    // and the plain view highlighted `#notAHeadline`. The two are one rule now;
+    // `wordIndex.test.ts` pins the agreement across every paragraph shape.
     const content = '#notAHeadline word'
     const pos = buildWordPositions(content)
-    // Not a headline (no space after #) → all tokens kept
-    expect(pos[0].text).toBe('#notAHeadline')
+    expect(pos[0].text).toBe('notAHeadline')
+    expect(content[pos[0].start]).toBe('n')
+  })
+
+  it('strips more than six # as well, since the tokenizer does', () => {
+    // The old `#{1,6}` bound was the other half of the same divergence: seven
+    // hashes made this walk count one word more than the tokenizer packed.
+    const content = '####### Seven\n\nBody'
+    const pos = buildWordPositions(content)
+    expect(pos[0].text).toBe('Seven')
   })
 
   it('does NOT strip # in the middle of a paragraph', () => {

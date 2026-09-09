@@ -3,6 +3,7 @@ import {
   type MeasureWidthFont,
   type ReaderTextMeasurer,
 } from './readerDisplayScale'
+import type { ReaderLinesAnchor } from '../../../shared/settings'
 
 const WIDTH_MEASURE_REF_SIZE = 100
 const DEFAULT_FONT_FAMILY = "-apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif"
@@ -23,6 +24,7 @@ export interface SolveReaderLayoutInput {
   wordsPerStack: number
   fontSize: number
   linesCount: number
+  anchor: ReaderLinesAnchor
   stackGap: number
   rowGap: number
   stackVerticalOffset: number
@@ -46,9 +48,11 @@ export interface ReaderLayoutDegradationDescriptor {
 
 export interface SolveReaderLayoutResult extends ReaderLayoutContentSize {
   effectiveFontSize: number
+  effectiveRowHeight: number
   effectiveStackGap: number
   effectiveRowGap: number
   effectiveLinesCount: number
+  anchor: ReaderLinesAnchor
   clampedVerticalOffset: number
   clampedHorizontalOffset: number
   stacksVisible: number
@@ -86,6 +90,7 @@ function safeFinite(value: number, fallback: number): number {
 function normalize(input: SolveReaderLayoutInput): NormalizedInput {
   return {
     ...input,
+    anchor: input.anchor ?? 'center',
     stageWidth: Math.max(0, safeFinite(input.stageWidth, 0)),
     stageHeight: Math.max(0, safeFinite(input.stageHeight, 0)),
     stacksVisible: Math.max(1, Math.floor(safeFinite(input.stacksVisible, 1))),
@@ -128,7 +133,7 @@ function textWidthAtFont(widestRefWidth: number, fontSize: number): number {
   return (Math.max(0, widestRefWidth) * Math.max(0, fontSize)) / WIDTH_MEASURE_REF_SIZE
 }
 
-function rowHeightAtFont(fontSize: number): number {
+export function rowHeightAtFont(fontSize: number): number {
   return Math.max(0, fontSize) / HEIGHT_FIT_RATIO
 }
 
@@ -237,15 +242,18 @@ function clampOffsets(params: {
   stageWidth: number
   stageHeight: number
   content: ReaderLayoutContentSize
+  anchor: ReaderLinesAnchor
   stackVerticalOffset: number
   stackHorizontalOffset: number
 }): Pick<SolveReaderLayoutResult, 'clampedVerticalOffset' | 'clampedHorizontalOffset'> {
   const horizontalSlack = Math.max(0, (params.stageWidth - params.content.width) / 2)
-  const verticalSlack = Math.max(0, (params.stageHeight - params.content.height) / 2)
+  const verticalSlack = Math.max(0, params.stageHeight - params.content.height)
+  const minVerticalOffset = params.anchor === 'top' ? 0 : -verticalSlack / 2
+  const maxVerticalOffset = params.anchor === 'top' ? verticalSlack : verticalSlack / 2
 
   return {
     clampedHorizontalOffset: clamp(params.stackHorizontalOffset, -horizontalSlack, horizontalSlack),
-    clampedVerticalOffset: clamp(params.stackVerticalOffset, -verticalSlack, verticalSlack),
+    clampedVerticalOffset: clamp(params.stackVerticalOffset, minVerticalOffset, maxVerticalOffset),
   }
 }
 
@@ -261,6 +269,7 @@ function result(
     stageWidth: input.stageWidth,
     stageHeight: input.stageHeight,
     content,
+    anchor: input.anchor,
     stackVerticalOffset: input.stackVerticalOffset,
     stackHorizontalOffset: input.stackHorizontalOffset,
   })
@@ -269,9 +278,11 @@ function result(
     ...content,
     ...offsets,
     effectiveFontSize: state.fontSize,
+    effectiveRowHeight: rowHeightAtFont(state.fontSize),
     effectiveStackGap: state.stackGap,
     effectiveRowGap: state.rowGap,
     effectiveLinesCount: state.linesCount,
+    anchor: input.anchor,
     stacksVisible: input.stacksVisible,
     wordsPerStack: input.wordsPerStack,
     degradation: {

@@ -115,7 +115,6 @@ export const RWW_SETTINGS_LAYOUT: readonly RwwSettingsTab[] = [
                 fields: [
                   'words_per_stack',
                   'stacks_visible',
-                  'lines_enabled',
                   'lines_count',
                 ],
               },

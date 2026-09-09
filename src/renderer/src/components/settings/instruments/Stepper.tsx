@@ -1,4 +1,5 @@
-import React, { useEffect, useRef, useState } from 'react'
+import React from 'react'
+import { useDraftValue } from '../../../hooks/useDraftValue'
 
 interface StepperProps {
   /** Accessible name — used for the −/+ buttons and (optionally) the value box. */
@@ -36,18 +37,14 @@ export default function Stepper({
   disabled = false,
   id,
 }: StepperProps) {
-  const [draft, setDraft] = useState(String(value))
-  const focusedRef = useRef(false)
-  useEffect(() => {
-    if (!focusedRef.current) setDraft(String(value))
-  }, [value])
-
   const commit = (raw: string) => {
     const parsed = Number(raw)
     const next = raw.trim() === '' || !Number.isFinite(parsed) ? value : clamp(Math.round(parsed), min, max)
     onChange(next)
     setDraft(String(next))
   }
+
+  const { draft, setDraft, onFocus, onBlur, onKeyDown } = useDraftValue(value, commit)
 
   const atMin = value <= min
   const atMax = value >= max
@@ -74,21 +71,10 @@ export default function Stepper({
           value={draft}
           aria-label={`${label} value`}
           disabled={disabled}
-          onFocus={() => {
-            focusedRef.current = true
-          }}
+          onFocus={onFocus}
           onChange={(e) => setDraft(e.target.value)}
-          onBlur={() => {
-            focusedRef.current = false
-            commit(draft)
-          }}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') e.currentTarget.blur()
-            if (e.key === 'Escape') {
-              setDraft(String(value))
-              e.currentTarget.blur()
-            }
-          }}
+          onBlur={onBlur}
+          onKeyDown={onKeyDown}
         />
       ) : (
         <span className="settings-stepper-value" aria-hidden="true">

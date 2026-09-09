@@ -1,23 +1,16 @@
 import { ipcRenderer } from 'electron'
+import {
+  appChannelContract,
+  createChannelApi,
+  dataChannelContract,
+  fileChannelContract,
+  videoChannelContract
+} from '../shared/channelContract'
 
-export const appApi = {
-  getVersion: () => ipcRenderer.invoke('app:getVersion'),
-  splashReady: () => ipcRenderer.send('splash:renderer-ready')
-}
+export const appApi = createChannelApi(ipcRenderer, appChannelContract)
 
-export const fileApi = {
-  open: () => ipcRenderer.invoke('file:open')
-}
+export const fileApi = createChannelApi(ipcRenderer, fileChannelContract)
 
-export const dataApi = {
-  exportAll: () => ipcRenderer.invoke('export:all'),
-  importJson: () => ipcRenderer.invoke('import:json'),
-  selectPortableTarget: () => ipcRenderer.invoke('portable:selectTarget'),
-  createPortableDrive: (targetPath: string) =>
-    ipcRenderer.invoke('portable:createDrive', targetPath)
-}
+export const dataApi = createChannelApi(ipcRenderer, dataChannelContract)
 
-export const videoApi = {
-  save: (buffer: ArrayBuffer, suggestedName: string) =>
-    ipcRenderer.invoke('video:save', buffer, suggestedName)
-}
+export const videoApi = createChannelApi(ipcRenderer, videoChannelContract)

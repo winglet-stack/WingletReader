@@ -37,7 +37,7 @@ function ReaderSettingsSummary({ config }: { config: TransmuteConfig }) {
       <span className="transmute-settings-chip">{config.bpm * config.wordsPerStack} WPM</span>
       <span className="transmute-settings-chip">{config.fontSize}px</span>
       {config.fontFamily && <span className="transmute-settings-chip">{config.fontFamily}</span>}
-      {config.linesEnabled && config.linesCount > 1 && (
+      {config.linesCount > 1 && (
         <span className="transmute-settings-chip">
           {config.linesCount} rows x {config.stacksVisible} col
         </span>

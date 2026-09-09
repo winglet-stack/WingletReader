@@ -42,6 +42,7 @@ import TransmuteReaderStep from './transmute/TransmuteReaderStep'
 import TransmuteOverviewStep from './transmute/TransmuteOverviewStep'
 import TransmutePreviewPanel from './transmute/TransmutePreviewPanel'
 import TransmuteSourceSelect from './transmute/TransmuteSourceSelect'
+import AlphaNotice from './AlphaNotice'
 import { alphaChrome } from '../alphaChrome'
 
 interface Props {
@@ -554,16 +555,13 @@ export default function TransmuteView({ texts, settings, onSaveSettings, onOpenR
         )}
       </header>
 
-      {alphaChrome.transmuteExperimentalBannerEnabled && (
-        <div
-          className="warnings-box"
-          role="status"
-          aria-label="Transmute experimental warning"
-          style={{ marginBottom: '12px' }}
-        >
-          {alphaChrome.transmuteExperimentalBannerCopy}
-        </div>
-      )}
+      <AlphaNotice
+        enabled={alphaChrome.transmuteExperimentalBannerEnabled}
+        label="Transmute experimental warning"
+        style={{ marginBottom: '12px' }}
+      >
+        {alphaChrome.transmuteExperimentalBannerCopy}
+      </AlphaNotice>
 
       {renderError && (
         <div className="toast toast-error" role="alert" style={{ marginBottom: '12px' }}>

@@ -53,9 +53,15 @@ describe('settingMetadata — reveal gates', () => {
     expect(settingMeta('words_per_stack').reveal).toBeUndefined()
   })
 
-  it('lines_count, highlight mode/panning, and highlight colours gate on their owners', () => {
-    expect(settingMeta('lines_count').reveal!({ ...base, lines_enabled: false })).toBe(false)
-    expect(settingMeta('lines_count').reveal!({ ...base, lines_enabled: true })).toBe(true)
+  it('line count is always visible and Anchor follows the resolved effective count', () => {
+    expect(settingMeta('lines_count').reveal).toBeUndefined()
+
+    const anchor = settingMeta('lines_anchor')
+    expect(anchor.reveal!({ ...base, lines_count: 1 })).toBe(false)
+    expect(anchor.reveal!({ ...base, lines_count: 3 })).toBe(true)
+  })
+
+  it('highlight mode/panning and highlight colours gate on their owners', () => {
 
     // highlight_mode is nested under the Highlight toggle (ADR-0019).
     expect(settingMeta('highlight_mode').reveal!({ ...base, highlight_active: false })).toBe(false)
@@ -73,8 +79,8 @@ describe('settingMetadata — reveal gates', () => {
   it('lines_row_gap is disabled (not hidden) without multiple lines', () => {
     const m = settingMeta('lines_row_gap')
     expect(m.reveal).toBeUndefined()
-    expect(m.disabledWhen!({ ...base, lines_enabled: false })).toBe(true)
-    expect(m.disabledWhen!({ ...base, lines_enabled: true })).toBe(false)
+    expect(m.disabledWhen!({ ...base, lines_count: 1 })).toBe(true)
+    expect(m.disabledWhen!({ ...base, lines_count: 3 })).toBe(false)
   })
 })
 
@@ -87,6 +93,25 @@ describe('settingMetadata — structure matches the roster', () => {
     expect(settingMeta('highlight_mode').instrument).toBe('Segmented')
     expect(settingMeta('highlight_mode').options).toHaveLength(3)
     expect(SETTING_METADATA['highlighting_mode']).toBeUndefined()
+  })
+
+  it('models line count and Anchor without exposing the derived lines toggle', () => {
+    expect(settingMeta('lines_count')).toEqual(expect.objectContaining({
+      instrument: 'Stepper',
+      label: 'Line count',
+      min: 1,
+      max: 10,
+    }))
+    expect(settingMeta('lines_anchor')).toEqual(expect.objectContaining({
+      instrument: 'Segmented',
+      label: 'Anchor',
+      defaultValue: 'center',
+    }))
+    expect(settingMeta('lines_anchor').options).toEqual([
+      { value: 'center', label: 'Centred' },
+      { value: 'top', label: 'Top-anchored' },
+    ])
+    expect((SETTING_METADATA as Record<string, unknown>).lines_enabled).toBeUndefined()
   })
 
   it('drops the culled settings from the metadata roster (ADR-0019 §4 — SR-2)', () => {

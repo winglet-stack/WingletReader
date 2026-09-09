@@ -3,6 +3,12 @@ import React from 'react'
 export interface SegmentedOption<T extends string | boolean> {
   value: T
   label: string
+  /**
+   * Disable this option alone — for enums where one choice is unavailable in
+   * the current context (a Stats timeframe with too little history) while the
+   * rest stay live. The whole-control `disabled` prop still wins over it.
+   */
+  disabled?: boolean
 }
 
 interface SegmentedProps<T extends string | boolean> {
@@ -36,7 +42,7 @@ export default function Segmented<T extends string | boolean>({
             type="button"
             className={`theme-pill${active ? ' theme-pill-active' : ''}`}
             aria-pressed={active}
-            disabled={disabled}
+            disabled={disabled || option.disabled === true}
             onClick={() => onChange(option.value)}
           >
             {option.label}

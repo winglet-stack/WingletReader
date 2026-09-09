@@ -1,13 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { scanText } from './wordHighlight'
 import type { WordPosition } from './wordHighlight'
-import { computePageStartsFromCounts, pageForWordOffset, pageRange } from './textPagination'
 import type { PageRange } from './textPagination'
+import type { TextWordIndex } from './wordIndex'
 
 export interface TextPagingState {
-  wordPositions: WordPosition[]
+  wordPositions: readonly WordPosition[]
   totalWords: number
-  pageStarts: number[]
+  pageStarts: readonly number[]
   totalPages: number
   currentPage: number
   detached: boolean
@@ -17,74 +16,49 @@ export interface TextPagingState {
   goPrev: () => void
   goNext: () => void
   locate: () => void
-}
-
-/** Paging shape for a text whose scan has been deferred (OL-1): no words yet, one Page. */
-const DEFERRED_PAGING: { wordPositions: WordPosition[]; pageStarts: number[] } = {
-  wordPositions: [],
-  pageStarts: [0],
+  /**
+   * Bumped by every {@link TextPagingState.locate} call. Locate is a *request to
+   * scroll*, and the reader can ask for it again from the Page they are already
+   * on, so the paging state alone cannot express it — the counter is the event.
+   * It lives here rather than in `Reader.tsx` because Locate is a paging move.
+   */
+  locateRevision: number
 }
 
 /**
  * State layer for ADR-0025's paged plain-text view.
  *
- * Inputs are deliberately limited to the rendered text and the playhead's
- * whole-text word offset so this hook can be reused outside TextViewPanel.
+ * Paging state only: which Page the playhead is on, whether the user has
+ * detached from it, and the moves between Pages. Every lookup comes off the
+ * **word index** it is handed (`architecture-depth/08`) — this hook does not
+ * walk the text and does not decide when the walk happens. That decision lives
+ * in `useWordIndex`, which defers the whole-book walk until a surface needs it
+ * (OL-1) and keeps it once made; until then the index is
+ * `EMPTY_TEXT_INDEX` and paging reports an empty single Page, exactly as before.
  *
- * `active` gates the heavy whole-book scan (OL-1): the two Text-view passes
- * serve only the plain paged view, so they must not run on the RSVP engage
- * first-paint frame. The scan is deferred until the view is entered — until
- * then paging reports an empty single Page — and once computed it stays
- * computed for the current text (toggling back to RSVP does not re-scan). The
- * scan is unified into one `scanText` pass so the book tokenizes once, not
- * twice. Callers that always show the view (default) get eager computation.
+ * Inputs are deliberately limited to the index and the playhead's whole-text
+ * word offset, so this hook can be reused outside `TextViewPanel`.
  */
 export function useTextPaging(
-  displayContent: string,
-  currentWordOffset: number,
-  active = true
+  index: TextWordIndex,
+  currentWordOffset: number
 ): TextPagingState {
-  // Sticky compute latch, resolved during render (never in an effect, so a text
-  // engaged straight into RSVP never scans on its first-paint frame — an effect
-  // would fire too late, after that frame). `computed` is derived, not read from
-  // state, so it is coherent within the render that changes the text: on a text
-  // change it resets to `active` immediately, so the scan memo never tokenizes a
-  // freshly-engaged text while the view is inactive. The latch state only carries
-  // "was ever active for this text" across renders. Keeps the scan memo keyed on
-  // displayContent + this flag only, never `currentWordOffset` (ADR-0025 §1).
-  const [prevContent, setPrevContent] = useState(displayContent)
-  const [latched, setLatched] = useState(active)
-  const contentChanged = displayContent !== prevContent
-  const computed = contentChanged ? active : latched || active
-
-  if (contentChanged) {
-    setPrevContent(displayContent)
-    setLatched(active)
-  } else if (active && !latched) {
-    setLatched(true)
-  }
-
-  const { wordPositions, pageStarts } = useMemo(() => {
-    if (!computed) return DEFERRED_PAGING
-    const { wordPositions, paragraphWordCounts } = scanText(displayContent)
-    return { wordPositions, pageStarts: computePageStartsFromCounts(paragraphWordCounts) }
-  }, [displayContent, computed])
-
-  const totalWords = wordPositions.length
+  const { wordPositions, pageStarts, totalWords } = index
   const totalPages = pageStarts.length
 
   const playheadPage = useMemo(
-    () => pageForWordOffset(pageStarts, currentWordOffset),
-    [pageStarts, currentWordOffset]
+    () => index.pageAtOffset(currentWordOffset),
+    [index, currentWordOffset]
   )
 
   const [detachedPage, setDetachedPage] = useState<number | null>(null)
+  const [locateRevision, setLocateRevision] = useState(0)
   const detached = detachedPage !== null
   const currentPage = detached ? detachedPage : playheadPage
 
   useEffect(() => {
     setDetachedPage(null)
-  }, [displayContent])
+  }, [index])
 
   useEffect(() => {
     if (detachedPage !== null && detachedPage === playheadPage) {
@@ -95,8 +69,8 @@ export function useTextPaging(
   const canBack = currentPage > 0
   const canForward = currentPage < totalPages - 1
   const currentRange = useMemo(
-    () => pageRange(pageStarts, currentPage, totalWords),
-    [pageStarts, currentPage, totalWords]
+    () => index.pageRangeAt(currentPage),
+    [index, currentPage]
   )
 
   const goPrev = useCallback(() => {
@@ -109,6 +83,7 @@ export function useTextPaging(
 
   const locate = useCallback(() => {
     setDetachedPage(null)
+    setLocateRevision((revision) => revision + 1)
   }, [])
 
   return {
@@ -124,5 +99,6 @@ export function useTextPaging(
     goPrev,
     goNext,
     locate,
+    locateRevision,
   }
 }

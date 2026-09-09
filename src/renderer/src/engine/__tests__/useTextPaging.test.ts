@@ -3,8 +3,8 @@
 import { renderHook, act, cleanup } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { useTextPaging } from '../useTextPaging'
+import { useTextWordIndex } from '../../hooks/useWordIndex'
 import * as wordHighlight from '../wordHighlight'
-import * as textPagination from '../textPagination'
 
 const words = (count: number, prefix: string) =>
   Array.from({ length: count }, (_, i) => `${prefix}${i}`).join(' ')
@@ -17,9 +17,16 @@ const THREE_PAGE_TEXT = [
 
 const SINGLE_PAGE_TEXT = 'alpha beta gamma'
 
+/**
+ * Paging over the word index, as the Reader composes them
+ * (`architecture-depth/08`): `useTextWordIndex` owns the deferred whole-book
+ * walk, `useTextPaging` owns the Page state on top of it. The two are rendered
+ * together here so every case below — including the OL-1 deferral ones — reads
+ * exactly as it did when one hook did both jobs.
+ */
 function renderPaging(displayContent = THREE_PAGE_TEXT, currentWordOffset = 0, active = true) {
   return renderHook(
-    ({ content, offset, isActive }) => useTextPaging(content, offset, isActive),
+    ({ content, offset, isActive }) => useTextPaging(useTextWordIndex(content, isActive), offset),
     { initialProps: { content: displayContent, offset: currentWordOffset, isActive: active } }
   )
 }
@@ -130,18 +137,17 @@ describe('useTextPaging', () => {
     expect(scanSpy.mock.calls.length).toBe(scanCalls)
   })
 
-  it('shares a single forEachWord pass — no separate buildWordPositions / computePageStarts', () => {
-    // OL-1 unification: the hook must not call the per-scan helpers (each of which
-    // would walk the whole book independently); it goes through scanText once.
-    const wordPositionsSpy = vi.spyOn(wordHighlight, 'buildWordPositions')
-    const pageStartsSpy = vi.spyOn(textPagination, 'computePageStarts')
+  it('walks the book exactly once, however many lookups the page state makes', () => {
+    // OL-1 unification, now enforced structurally: the only walk in the tree is
+    // the index's, and paging asks it questions rather than re-scanning. The
+    // one-shot helpers that used to walk independently no longer exist.
     const scanSpy = vi.spyOn(wordHighlight, 'scanText')
 
-    renderPaging(THREE_PAGE_TEXT, 0)
+    const { result } = renderPaging(THREE_PAGE_TEXT, 0)
+    act(() => result.current.goNext())
+    act(() => result.current.locate())
 
     expect(scanSpy).toHaveBeenCalledTimes(1)
-    expect(wordPositionsSpy).not.toHaveBeenCalled()
-    expect(pageStartsSpy).not.toHaveBeenCalled()
   })
 
   it('defers the scan off the engage frame until the view is active (OL-1)', () => {

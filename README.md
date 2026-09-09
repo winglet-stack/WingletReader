@@ -5,7 +5,7 @@
 **A local-first desktop speed-reading application.**
 Turn any text into a rhythmic, adjustable word-stream — and keep every byte of your library on your own machine.
 
-`Electron` · `React` · `TypeScript` · **Early alpha — v0.2.0-alpha.1**
+`Electron` · `React` · `TypeScript` · **Early alpha — v0.2.1-alpha.1**
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/hub-dark.png">
@@ -170,12 +170,12 @@ colour **Palettes** keep configurations you like.
 - **Frozen back-compat identifiers.** A handful of legacy `fasttrack` identifiers
   (the data filename, app id, storage keys) are deliberately *frozen* so existing
   users' data never orphans — documented as invariants in [`CONTEXT.md`](CONTEXT.md).
-- **Decisions are recorded.** [31 Architecture Decision Records](docs/adr) trace
+- **Decisions are recorded.** [36 Architecture Decision Records](docs/adr) trace
   the reasoning behind the data layer, the settings model, the hub, the design
   system, bookmarks, the session model, and more.
 - **A real design system, and tested.** One vanilla `index.css`, role-based
   colour, and hand-drawn pixel-art sprites ([`docs/design-system.md`](docs/design-system.md));
-  94 Vitest files, including a normalization conformance corpus for the import
+  137 Vitest files, including a normalization conformance corpus for the import
   pipeline.
 
 ## Architecture
@@ -186,13 +186,19 @@ Three process layers, wired the standard Electron way:
 Main (Node / Electron)
   ├── database.ts            JSON file store (texts, settings, segments, bookmarks)
   ├── fileParser.ts          .txt / .docx / .pdf → plain text + blocks
-  ├── importTextCleanup.ts   Post-import normalisation
+  ├── wingletBookImport.ts   Structured .wbook parse + commit
+  ├── epubImport.ts          Structured .epub container + commit pipeline
+  ├── epubExtract.ts         EPUB XHTML → plain text
   ├── readWhileWorkingCore   Overlay Reader window + tray + capture
   ├── updater.ts             Packaged-build auto-update check
   ├── portableMode.ts        USB / run-in-place storage redirect
   └── index.ts               Window management + app lifecycle
 Preload
   └── contextBridge          Typed window.api exposed to the renderer
+Shared
+  ├── importTextCleanup.ts   Plain-text + markup-extracted cleanup profiles
+  ├── wingletBook.ts         Curated-book contract + derivation
+  └── epubBook.ts            EPUB spine/TOC → chapter derivation
 Renderer (React)
   ├── App / AppShell          Composition root + app body
   ├── contexts/               Navigation → Settings → Library → Reader providers
@@ -293,6 +299,8 @@ in [ROADMAP.md](ROADMAP.md).
 | Standard Reader | ✅ Active |
 | Library, categories, contents | ✅ Active |
 | Import (`.txt` / `.docx` / `.pdf` / paste) | ✅ Active |
+| EPUB import (`.epub`, publisher chapters preserved) | ✅ Shipped, alpha notice |
+| Reading stats, goals & streaks | ✅ Shipped |
 | Bookmarks & reading **Targets** | ✅ Shipped |
 | Make Video (MP4 export) | ✅ Active |
 | Portable USB mode | ✅ Shipped |
@@ -300,7 +308,7 @@ in [ROADMAP.md](ROADMAP.md).
 | Overlay Reader  | 🚧 Active, in development |
 | Post-reading summary flow | 🔒 Built, disabled for alpha v1 |
 | In-app feedback sender | ⏳ Planned |
-| Curated pre-formatted book bundle | ⏳ Planned |
+| Curated Winglet Book import (`.wbook`) | ✅ Shipped |
 
 ## License
 

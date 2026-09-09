@@ -40,6 +40,10 @@ export default function AddChapterPanel({ targetBook, chapterCount, onSaved, onC
     activeContent,
     wordCount: wc,
     paragraphCount,
+    // Deliberately no `onWingletBook` (ADR-0033) and no `onEpubBook`
+    // (ADR-0034 §8): this surface appends one content to an existing text, and
+    // either of those is a whole book with its own chapters. The hook refuses
+    // both picks with a pointer to Import.
   } = usePasteOrFileImportWithAutoTitle(setChapterTitle)
 
   const handleSave = async () => {

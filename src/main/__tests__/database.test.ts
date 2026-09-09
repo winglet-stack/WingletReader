@@ -124,6 +124,363 @@ describe('categories — migration and fallback', () => {
   })
 })
 
+describe('load migration ladder', () => {
+  function writeStore(overrides: Record<string, unknown>): void {
+    writeFileSync(
+      storePath,
+      JSON.stringify(
+        {
+          nextId: 1,
+          nextCategoryId: 4,
+          nextSegmentId: 1,
+          nextBookmarkId: 1,
+          nextSummaryId: 1,
+          nextSummaryQuestionId: 1,
+          texts: [],
+          categories: [],
+          segments: [],
+          bookmarks: [],
+          summaries: [],
+          summaryQuestions: [],
+          readingPositions: [],
+          settings: {},
+          seededIds: [],
+          seededBundleVersion: 0,
+          ...overrides
+        },
+        null,
+        2
+      ),
+      'utf-8'
+    )
+  }
+
+  it('normalizes category records, restores built-ins, and repairs text assignments', () => {
+    writeStore({
+      nextCategoryId: 2,
+      categories: [
+        null,
+        { id: 'bad', name: 'Discard me' },
+        { id: 1, name: ' Inbox ', is_system: false, is_locked: false },
+        { id: 7, name: ' First name ', is_system: true, is_locked: true },
+        { id: 7, name: ' Research ' }
+      ],
+      texts: [
+        { id: 1, title: 'Valid category', content: 'alpha', category_id: 7 },
+        { id: 2, title: 'Missing category', content: 'beta', category_id: 99 }
+      ]
+    })
+
+    const migrated = new Database(storePath)
+
+    expect(migrated.getCategories()).toEqual([
+      { id: 1, name: 'Inbox', is_system: true, is_locked: true },
+      { id: 2, name: 'Reading', is_system: true },
+      { id: 3, name: 'Archive', is_system: true },
+      { id: 7, name: 'Research' }
+    ])
+    expect(migrated.getText(1)?.category_id).toBe(7)
+    expect(migrated.getText(2)?.category_id).toBe(UNCATEGORIZED_CATEGORY_ID)
+    expect(migrated.saveCategory({ name: 'Next category' }).id).toBe(8)
+  })
+
+  it('preserves a future next-category counter above the repaired maximum', () => {
+    writeStore({
+      nextCategoryId: 20,
+      categories: [{ id: 7, name: 'Research' }]
+    })
+
+    const migrated = new Database(storePath)
+
+    expect(migrated.saveCategory({ name: 'Future category' }).id).toBe(20)
+  })
+
+  it('defaults null counters and malformed record collections before the next write', () => {
+    writeStore({
+      nextId: null,
+      nextSegmentId: null,
+      nextBookmarkId: null,
+      nextSummaryId: null,
+      nextSummaryQuestionId: null,
+      segments: {},
+      bookmarks: 'invalid',
+      summaries: null,
+      summaryQuestions: 42,
+      readingPositions: false,
+      seededIds: ['kept', 42, null],
+      seededBundleVersion: 'invalid'
+    })
+
+    const migrated = new Database(storePath)
+    expect(migrated.saveText({ title: 'First', content: 'one' }).id).toBe(1)
+
+    const persisted = JSON.parse(readFileSync(storePath, 'utf-8'))
+    expect(persisted).toMatchObject({
+      nextId: 2,
+      nextSegmentId: 1,
+      nextBookmarkId: 1,
+      nextSummaryId: 1,
+      nextSummaryQuestionId: 1,
+      segments: [],
+      bookmarks: [],
+      summaries: [],
+      summaryQuestions: [],
+      readingPositions: [],
+      seededIds: ['kept'],
+      seededBundleVersion: 0
+    })
+  })
+})
+
+describe('saveText record decisions', () => {
+  const diagnostics = {
+    parser: 'mammoth' as const,
+    sourceExtension: 'docx' as const,
+    charCount: 13,
+    wordCount: 3,
+    paragraphCount: 1,
+    cleanupActions: [],
+    suspiciousSignals: []
+  }
+  const blocks = [{ type: 'paragraph' as const, text: 'one two three', order: 0 }]
+
+  it('builds a new record from normalized content, category, and optional fields', () => {
+    const category = db.saveCategory({ name: 'Research' })
+
+    const saved = db.saveText({
+      title: 'Structured',
+      content: '  one\n\ttwo   three  ',
+      seed_id: 'curated-id',
+      author: 'Ada Author',
+      source_type: 'docx',
+      page_count: 4,
+      content_html: '<p>one two three</p>',
+      content_display: 'one\ntwo three',
+      import_diagnostics: diagnostics,
+      import_blocks: blocks,
+      category_id: category.id
+    })
+
+    expect(saved).toMatchObject({
+      id: 1,
+      title: 'Structured',
+      word_count: 3,
+      seed_id: 'curated-id',
+      author: 'Ada Author',
+      source_type: 'docx',
+      page_count: 4,
+      content_html: '<p>one two three</p>',
+      content_display: 'one\ntwo three',
+      import_diagnostics: diagnostics,
+      import_blocks: blocks,
+      category_id: category.id
+    })
+    expect(Object.keys(JSON.parse(readFileSync(storePath, 'utf-8')).texts[0])).toEqual([
+      'id',
+      'title',
+      'content',
+      'word_count',
+      'is_manual_book',
+      'seed_id',
+      'author',
+      'source_type',
+      'page_count',
+      'content_html',
+      'content_display',
+      'import_diagnostics',
+      'import_blocks',
+      'category_id',
+      'created_at',
+      'updated_at'
+    ])
+  })
+
+  it('uses record defaults and omits unsupplied optional fields from disk', () => {
+    const saved = db.saveText({})
+
+    expect(saved).toMatchObject({
+      id: 1,
+      title: 'Untitled',
+      content: '',
+      word_count: 0,
+      is_manual_book: false,
+      category_id: UNCATEGORIZED_CATEGORY_ID
+    })
+    const persisted = JSON.parse(readFileSync(storePath, 'utf-8')).texts[0]
+    expect(persisted).not.toHaveProperty('seed_id')
+    expect(persisted).not.toHaveProperty('author')
+    expect(persisted).not.toHaveProperty('source_type')
+    expect(persisted).not.toHaveProperty('page_count')
+    expect(persisted).not.toHaveProperty('content_html')
+    expect(persisted).not.toHaveProperty('content_display')
+    expect(persisted).not.toHaveProperty('import_diagnostics')
+    expect(persisted).not.toHaveProperty('import_blocks')
+  })
+
+  it('patches supplied fields without erasing omitted content metadata', () => {
+    const category = db.saveCategory({ name: 'Research' })
+    const original = db.saveText({
+      title: 'Original',
+      content: 'one two three',
+      author: 'Ada Author',
+      source_type: 'docx',
+      page_count: 4,
+      content_html: '<p>one two three</p>',
+      content_display: 'one\ntwo three',
+      import_diagnostics: diagnostics,
+      import_blocks: blocks,
+      category_id: category.id
+    })
+
+    const renamed = db.saveText({ id: original.id, title: 'Renamed' })
+    expect(renamed).toMatchObject({
+      title: 'Renamed',
+      content: 'one two three',
+      word_count: 3,
+      author: 'Ada Author',
+      source_type: 'docx',
+      page_count: 4,
+      content_html: '<p>one two three</p>',
+      content_display: 'one\ntwo three',
+      import_diagnostics: diagnostics,
+      import_blocks: blocks,
+      category_id: category.id
+    })
+
+    const cleared = db.saveText({
+      id: original.id,
+      content: ' \n\t ',
+      author: '',
+      category_id: 999
+    })
+    expect(cleared.word_count).toBe(0)
+    expect(cleared.author).toBe('')
+    expect(cleared.category_id).toBe(UNCATEGORIZED_CATEGORY_ID)
+    expect(cleared.source_type).toBe('docx')
+  })
+
+  it('treats an unknown incoming id as a new record with the store id', () => {
+    const saved = db.saveText({ id: 999, title: 'New', content: 'one two' })
+
+    expect(saved.id).toBe(1)
+    expect(saved.word_count).toBe(2)
+    expect(db.getText(999)).toBeNull()
+  })
+
+  it('round-trips a pre-existing canonical store byte for byte', () => {
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(new Date('2026-08-11T12:34:56.000Z'))
+      db.saveText({
+        title: 'Compatibility fixture',
+        content: 'one two three',
+        author: 'Ada Author',
+        source_type: 'docx',
+        page_count: 4,
+        content_html: '<p>one two three</p>',
+        content_display: 'one\ntwo three',
+        import_diagnostics: diagnostics,
+        import_blocks: blocks
+      })
+      const before = readFileSync(storePath, 'utf-8')
+
+      const reopened = new Database(storePath)
+      reopened.saveSettings({})
+
+      expect(readFileSync(storePath, 'utf-8')).toBe(before)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+// ── Library list projection ───────────────────────────────────────────────
+
+describe('getTexts — list projection', () => {
+  it('carries seed_id so the Library can tell a curated book from a user text', () => {
+    // ADR-0023 keys the "chapters" vocabulary, the suppressed Add Content
+    // affordance, and (ADR-0033) post-import lookup off seed_id — all of which
+    // read the list projection, not the full record.
+    db.saveText({ title: 'A Winglet Book', content: 'a b c', seed_id: 'the-lighthouse-keeper' })
+    db.saveText({ title: 'A User Text', content: 'd e f' })
+
+    const listed = db.getTexts()
+
+    expect(listed.find((t) => t.title === 'A Winglet Book')!.seed_id).toBe('the-lighthouse-keeper')
+    expect(listed.find((t) => t.title === 'A User Text')!.seed_id).toBeUndefined()
+    // Still a list projection: content stays out of it.
+    expect(listed.every((t) => t.content === undefined)).toBe(true)
+  })
+
+  it('carries source_type so an EPUB book reads as publisher-chaptered in the list', () => {
+    // ADR-0034 §8 extends the ADR-0023 vocabulary to `source_type: 'epub'`.
+    // The Library card count line and SegmentPanel header both read the list
+    // projection, so a dropped source_type made an imported novel say
+    // "contents".
+    db.saveText({ title: 'An EPUB Book', content: 'a b c', source_type: 'epub' })
+    db.saveText({ title: 'A Pasted Text', content: 'd e f', source_type: 'text' })
+
+    const listed = db.getTexts()
+
+    expect(listed.find((t) => t.title === 'An EPUB Book')!.source_type).toBe('epub')
+    expect(listed.find((t) => t.title === 'A Pasted Text')!.source_type).toBe('text')
+    // Distinct axes: an EPUB book carries no seed_id, so Add Content stays.
+    expect(listed.find((t) => t.title === 'An EPUB Book')!.seed_id).toBeUndefined()
+  })
+})
+
+describe('retired launch-ledger compatibility', () => {
+  it('round-trips dormant ledger keys while legacy curated books remain ordinary deletable texts', () => {
+    const book = db.saveText({
+      title: 'Legacy Curated Book',
+      content: 'chapter words remain readable',
+      seed_id: 'legacy-curated-book'
+    })
+    db.saveSegments(book.id!, [
+      {
+        title: 'Chapter 1',
+        content: 'chapter words remain readable',
+        order: 0,
+        sourceType: 'detected_heading',
+        word_count: 4,
+        startWordOffset: 0,
+        endWordOffset: 4
+      }
+    ])
+    const legacyStore = JSON.parse(readFileSync(storePath, 'utf-8'))
+    legacyStore.seededIds = ['legacy-curated-book', 'previously-deleted-book']
+    legacyStore.seededBundleVersion = 7
+    writeFileSync(storePath, JSON.stringify(legacyStore, null, 2), 'utf-8')
+
+    const reopened = new Database(storePath)
+    expect(reopened.getText(book.id!)).toMatchObject({
+      title: 'Legacy Curated Book',
+      content: 'chapter words remain readable',
+      seed_id: 'legacy-curated-book'
+    })
+    expect(reopened.getTexts()[0].seed_id).toBe('legacy-curated-book')
+    expect(reopened.getSegments(book.id!)).toMatchObject([
+      {
+        title: 'Chapter 1',
+        sourceType: 'detected_heading',
+        startWordOffset: 0,
+        endWordOffset: 4
+      }
+    ])
+
+    reopened.deleteText(book.id!)
+    expect(reopened.getText(book.id!)).toBeNull()
+    expect(reopened.getSegments(book.id!)).toEqual([])
+
+    const roundTripped = JSON.parse(readFileSync(storePath, 'utf-8'))
+    expect(roundTripped.seededIds).toEqual([
+      'legacy-curated-book',
+      'previously-deleted-book'
+    ])
+    expect(roundTripped.seededBundleVersion).toBe(7)
+  })
+})
+
 // ── Reading position save / restore ───────────────────────────────────────
 
 describe('reading position — save and retrieve', () => {

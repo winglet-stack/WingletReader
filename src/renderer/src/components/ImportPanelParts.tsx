@@ -1,6 +1,29 @@
 import React from 'react'
 import type { ImportDiagnostics } from '../../../shared/importTypes'
 
+/** The Import surface header. Shared by the plain form and every confirm card,
+ *  which is why "Cancel" means leaving Import rather than putting a book down. */
+export function ImportSurfaceHeader({ onCancel }: { onCancel: () => void }) {
+  return (
+    <header className="view-header">
+      <h1>Import Text</h1>
+      <button className="btn-ghost" onClick={onCancel}>
+        Cancel
+      </button>
+    </header>
+  )
+}
+
+/** The surface's single error line: a failed submit or a failed commit. */
+export function ImportError({ error }: { error: string | null }) {
+  if (!error) return null
+  return (
+    <p className="form-error" role="alert">
+      {error}
+    </p>
+  )
+}
+
 /** Drop zone / file affordance for the Upload File tab. Native DnD for file paths
  *  isn't available in the Electron renderer, so this is a visual affordance that
  *  triggers the file open dialog. */
@@ -62,7 +85,7 @@ export function ImportDropZone({
         <>
           <div className="drop-icon">&#8682;</div>
           <p className="drop-hint">
-            {busy ? 'Opening…' : 'Click or drag to load a .txt, .docx, or .pdf file'}
+            {busy ? 'Opening…' : 'Click or drag to load a .txt, .docx, .pdf, or .epub file'}
           </p>
         </>
       )}

@@ -1,4 +1,6 @@
-# ADR-0004: Dead code archived in `src/renderer/src/_archived/`
+# ADR-0004: Dead code archived, not deleted
+
+> Location note: the archive moved from `src/renderer/src/_archived/` to repo-root `archive/` on 2026-07-20 — see the amendment at the end of this record.
 
 **Date:** 2026-06-09  
 **Status:** Accepted
@@ -36,3 +38,38 @@ The code is **not deleted** because:
 ## Notes
 
 The `Script` feature (`ScriptBuilder.tsx`, `scriptTypes.ts`, `useScriptPlayback.ts`) is **benched** (in-progress, not wired up) rather than dead. It remains in the main source tree. See `CONTEXT.md` for the feature status table.
+
+---
+
+## Amendment — 2026-07-20: archive relocated to repo-root `archive/`
+
+**Status:** Accepted. The original decision (archive, do not delete) is unchanged; this amendment corrects two consequences that had gone stale and moves the archive out of `src/`.
+
+### Corrections to the record above
+
+Both entries below described the state in 2026-06-09 and were no longer true by 2026-07-20:
+
+1. The Consequences entry "`App.tsx` still imports from `_archived/` — it is still compiled and bundled" is **obsolete**. The Script subsystem was unwired from `AppShell.tsx` during the foundation-cleanup pass, and the Summaries view lost its last render branch in wave-1 issue 11. Verified 2026-07-20: no file under `src/` imports anything in the archive.
+2. The Notes entry describing `Script` as "benched … remains in the main source tree" is **obsolete**. Script was archived alongside Trailer and Primer; `CONTEXT.md`'s feature table has recorded it as *Dead / archived* since then. The status table, not this note, is authoritative.
+
+### What changed
+
+`src/renderer/src/_archived/` → repo-root **`archive/`**.
+
+The archive was fully detached but still sat inside `src/`, which meant it was carried by every glob scoped to the source tree. Concretely, `vitest.config.ts` includes `src/**/*.test.ts{,x}`, so **roughly 1,800 lines of tests for shipped-to-nobody code ran on every `npm test`**, and `tsconfig.web.json` includes `src/renderer/src/**/*`, so the archive was typechecked. It also surfaced in every agent/editor search across `src/` — including the single largest file in the repo, `ScriptBuilder.tsx` (2,041 lines).
+
+Moving it to the repo root drops it out of those globs *by construction*, with no new exclude rules to keep in sync. Only two references needed updating: `.fallowrc.json`'s `ignorePatterns` (which had been carrying `**/_archived/**` — the reason fallow reported zero dead files), and `docs/architecture-map.md`.
+
+Imports that reached from the archive into the live tree were rewritten from depth-sensitive relative paths (`../../types`) to the `@renderer/*` alias, so they stay readable as reference and cannot rot again if the archive moves. Intra-archive relative imports are unchanged. The alias does not resolve from outside the tsconfig — intentional: the archive is reference material, not buildable code.
+
+### Consequences
+
+**Positive**
+- `src/` contains only active code; agent and editor searches no longer traverse ~6,800 dead lines
+- ~1,800 lines of archived tests no longer run on every `npm test`
+- Archive exclusion is structural (outside the glob) rather than a rule that can drift
+- Git history preserved — `git mv`, not delete; ADR-0004's core decision stands
+
+**Negative**
+- The archive no longer typechecks, so live-tree refactors will silently invalidate its `@renderer/*` imports. Accepted: it is reference material and has been unbuildable in practice since it was unwired.
+- Contributors must look outside `src/` for the full historical view-state list

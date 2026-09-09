@@ -19,6 +19,7 @@
  */
 
 import type { Settings } from '../../types'
+import { effectiveLinesCount, resolvedLinesAnchor } from '../../../../shared/settings'
 import type { SliderTransform } from './instruments/SliderField'
 import type { SegmentedOption } from './instruments/Segmented'
 import {
@@ -233,22 +234,28 @@ const LAYOUT: SettingMeta[] = [
     explain: 'How many word stacks sit side by side before the view redraws.',
   },
   {
-    field: 'lines_enabled',
-    group: 'layout',
-    instrument: 'Toggle',
-    label: 'Multiple lines',
-    defaultValue: false,
-  },
-  {
     field: 'lines_count',
     group: 'layout',
     instrument: 'Stepper',
-    label: 'Lines per screen',
-    defaultValue: 3,
-    min: 2,
-    max: 10, // D1: tighten to 2–6 with clamp-on-load in slice 02
+    label: 'Line count',
+    defaultValue: 1,
+    min: 1,
+    max: 10,
     step: 1,
-    reveal: (s) => s.lines_enabled === true,
+  },
+  {
+    field: 'lines_anchor',
+    group: 'layout',
+    instrument: 'Segmented',
+    label: 'Anchor',
+    defaultValue: 'center',
+    options: [
+      { value: 'center', label: 'Centred' },
+      { value: 'top', label: 'Top-anchored' },
+    ],
+    // Delegate the inert-at-one-line rule to the rendering resolver. Supplying
+    // the live value ('top') asks whether an anchor can be effective at all.
+    reveal: (s) => resolvedLinesAnchor({ ...s, lines_anchor: 'top' }) === 'top',
   },
 ]
 
@@ -353,7 +360,7 @@ const ALIGNMENT: SettingMeta[] = [
     min: 0,
     max: 64,
     step: 4,
-    disabledWhen: (s) => !s.lines_enabled,
+    disabledWhen: (s) => effectiveLinesCount(s) <= 1,
   },
   {
     field: 'stack_gap',

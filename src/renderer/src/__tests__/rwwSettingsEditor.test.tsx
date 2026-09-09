@@ -7,6 +7,7 @@ import {
   RWW_SETTINGS_LAYOUT_FIELDS,
 } from '../components/settings/rwwSettingsLayout'
 import { DEFAULT_SETTINGS, type Settings } from '../types'
+import { alphaChrome } from '../alphaChrome'
 
 const PREVIEW_OPEN_KEY = 'wingletreader.rwwSettings.playbackPreviewOpen'
 
@@ -51,7 +52,6 @@ describe('rwwSettingsLayout descriptor', () => {
     expect(grid.fields).toEqual([
       'words_per_stack',
       'stacks_visible',
-      'lines_enabled',
       'lines_count',
     ])
     expect(text.fields).toEqual(['font_size'])
@@ -91,7 +91,6 @@ describe('rwwSettingsLayout descriptor', () => {
       'live_rewind_key',
       'words_per_stack',
       'stacks_visible',
-      'lines_enabled',
       'lines_count',
       'font_size',
     ])
@@ -285,18 +284,18 @@ describe('RwwSettingsEditor', () => {
     expect(container.querySelectorAll('.rse-column').length).toBe(2)
   })
 
-  it('reveals Lines per screen only when Multiple lines is enabled', () => {
-    const { container } = render(<RwwSettingsEditor settings={DEFAULT_SETTINGS} onSave={vi.fn()} />)
+  it('always shows Line count at one and never exposes a lines toggle or Anchor', () => {
+    const { container } = render(
+      <RwwSettingsEditor
+        settings={{ ...DEFAULT_SETTINGS, lines_count: 1, lines_anchor: 'top' }}
+        onSave={vi.fn()}
+      />
+    )
     fireEvent.click(screen.getByRole('tab', { name: 'Reader configuration' }))
 
-    expect(screen.queryByText('Lines per screen')).toBeNull()
-
-    const multipleLinesRow = screen.getByText('Multiple lines').closest('.settings-row')
-    const checkbox = multipleLinesRow?.querySelector('input[type="checkbox"]')
-    expect(checkbox).toBeTruthy()
-    fireEvent.click(checkbox!)
-
-    expect(screen.getByRole('spinbutton', { name: 'Lines per screen value' })).toBeTruthy()
+    expect(screen.queryByText('Multiple lines')).toBeNull()
+    expect(screen.queryByRole('group', { name: 'Anchor' })).toBeNull()
+    expect((screen.getByRole('spinbutton', { name: 'Line count value' }) as HTMLInputElement).value).toBe('1')
     expect(container.querySelector('[data-rww-section="grid"]')).toBeTruthy()
   })
 
@@ -465,5 +464,20 @@ describe('RwwSettingsEditor', () => {
     expect(screen.getByRole('button', { name: 'Record Exit shortcut' }).textContent).toBe(
       'Ctrl + Space'
     )
+  })
+})
+
+describe('RwwSettingsEditor alpha notice (PRD D6)', () => {
+  it('shows the experimental warning at the top of the subview, above the controls', () => {
+    render(<RwwSettingsEditor settings={DEFAULT_SETTINGS} onSave={vi.fn()} />)
+
+    const banner = screen.getByRole('status', { name: 'Read While Working experimental warning' })
+    expect(banner.textContent).toBe(alphaChrome.rwwExperimentalBannerCopy)
+
+    // Above the tab bar, so it is read before anything else in the subview.
+    const tabbar = screen.getByRole('tablist', { name: 'Overlay Reader settings' })
+    expect(
+      banner.compareDocumentPosition(tabbar) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy()
   })
 })

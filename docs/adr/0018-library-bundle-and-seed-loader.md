@@ -1,7 +1,7 @@
 # ADR-0018: Reader Seed loader for the versioned Library Bundle
 
 **Date:** 2026-06-27
-**Status:** Accepted
+**Status:** Superseded in part by ADR-0033 (delivery contract and launch loader retired)
 
 > **Cross-repo note.** This decision originates in WingletBooks as **ADR-0003
 > (Versioned Library Bundle + additive Seed loader)**. This is the WingletReader

@@ -5,6 +5,12 @@ import { useReader } from '../contexts/ReaderContext'
 import { useAppShellHandlers } from './useAppShellHandlers'
 import { useAppShellErrors } from './useAppShellEffects'
 
+/**
+ * Everything a destination's body may read. The route table's `render` takes it
+ * whole, so a new destination needs no new plumbing.
+ */
+export type MainContentModel = ReturnType<typeof useAppShellMainContentModel>
+
 export function useAppShellMainContentModel(
   shellError: string | null,
   setShellError: (error: string | null) => void

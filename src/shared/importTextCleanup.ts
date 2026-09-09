@@ -240,6 +240,45 @@ export function cleanupImportedText(raw: string, options: CleanupOptions = {}): 
   return { content, actions }
 }
 
+/**
+ * The reduced cleanup profile for markup-extracted text (ADR-0034 §5) — the
+ * preservation invariant applied to the ADR-0015 pipeline.
+ *
+ * Text that came out of XHTML has none of the *plaintext* pathologies the full
+ * pipeline exists to repair: its paragraphs come from markup, not from hard line
+ * wraps, so there are no soft wraps to flatten, no words split across a line
+ * break to rejoin, and no `--` standing in for a dash the publisher couldn't
+ * type. Running those passes here could only rewrite authoritative punctuation,
+ * so this profile runs **character hygiene only**: BOM strip, line endings,
+ * unicode spaces, tabs, soft hyphens, repeated blank lines.
+ *
+ * **Explicitly not run:** soft-line-wrap conversion, dehyphenation, split-word
+ * joining, and {@link normalizeDashes} — a publisher's `--` or `----` stays
+ * verbatim. Soft hyphens (U+00AD) are the one deletion, because they are a
+ * rendering hint rather than authorial text and would break word tokenization.
+ *
+ * Because paragraph structure is already correct, this profile is
+ * newline-preserving: `content` and `content_display` are the same string for an
+ * EPUB, and word-count parity therefore holds trivially.
+ *
+ * Do not route this through {@link cleanupImportedText} or add passes to it: the
+ * normalization conformance corpus pins that function's behaviour, and this one
+ * is deliberately a different, smaller contract.
+ */
+export function cleanupExtractedMarkupText(raw: string): CleanupResult {
+  const actions: ImportCleanupAction[] = []
+  let content = raw ?? ''
+
+  content = stripBom(content, actions)
+  content = normalizeLineEndings(content, actions)
+  content = normalizeUnicodeSpaces(content, actions)
+  content = normalizeTabs(content, false, actions)
+  content = stripSoftHyphens(content, actions)
+  content = collapseRepeatedBlankLines(content, actions)
+
+  return { content, actions }
+}
+
 export function countWords(text: string): number {
   return text.trim().split(/\s+/).filter(Boolean).length
 }

@@ -7,6 +7,8 @@ import SliderField from '../settings/instruments/SliderField'
 import Stepper from '../settings/instruments/Stepper'
 import Segmented from '../settings/instruments/Segmented'
 import { settingMeta } from '../settings/settingMetadata'
+import { effectiveLinesCount, linesCountPatch } from '../../../../shared/settings'
+import type { ReaderLinesAnchor } from '../../../../shared/settings'
 
 // Shared metadata — Quick Settings renders the same instruments/ranges as the
 // Reader-defaults editor so a setting can never drift between surfaces (ADR-0014
@@ -16,6 +18,7 @@ const fontSizeMeta = settingMeta('font_size')
 const wpsMeta = settingMeta('words_per_stack')
 const stacksMeta = settingMeta('stacks_visible')
 const linesMeta = settingMeta('lines_count')
+const linesAnchorMeta = settingMeta('lines_anchor')
 const highlightModeMeta = settingMeta('highlight_mode')
 
 /** Write `highlight_mode` and its legacy `highlighting_mode` twin together
@@ -51,7 +54,7 @@ interface Props {
 /**
  * In-Reader Quick Settings — a flat ordered live list of the most-used controls
  * in reading-frequency order (ADR-0014 §6), built on the shared instrument kit:
- * Speed · Words/stack · Text size · Stacks · Multiple lines · Highlight ·
+ * Speed · Words/stack · Text size · Stacks · Line count/anchor · Highlight ·
  * Tap-to-read · "See more settings →". (Lock-at-WPM was de-UI'd — ADR-0019 §4.)
  *
  * Each control owns its own draft state (SliderField / Stepper), so this shell
@@ -185,33 +188,29 @@ export default function QuickSettingsPopover({
             </div>
           </div>
 
-          {/* 5 · Multiple lines + lines-per-screen */}
+          {/* 5 · Line count + conditional anchor */}
           <div className="reader-quickset-row">
-            <div className="reader-quickset-label">Multiple lines</div>
+            <div className="reader-quickset-label">{linesMeta.label}</div>
             <div className="reader-quickset-control">
-              <label className="toggle">
-                <input
-                  type="checkbox"
-                  checked={liveSettings.lines_enabled}
-                  onChange={(e) => onQuickSet({ lines_enabled: e.target.checked })}
-                />
-                <span className="toggle-track" />
-              </label>
+              <Stepper
+                label={linesMeta.label}
+                value={effectiveLinesCount(liveSettings)}
+                min={linesMeta.min!}
+                max={linesMeta.max!}
+                onChange={(lines_count) => onQuickSet(linesCountPatch(lines_count))}
+              />
             </div>
           </div>
 
-          {liveSettings.lines_enabled && (
+          {linesAnchorMeta.reveal?.(liveSettings) && (
             <div className="reader-quickset-row reader-quickset-row--sub">
-              <div className="reader-quickset-label">Lines per screen</div>
-              <div className="reader-quickset-control">
-                <Stepper
-                  label="Lines per screen"
-                  value={liveSettings.lines_count}
-                  min={linesMeta.min!}
-                  max={linesMeta.max!}
-                  onChange={(lines_count) => onQuickSet({ lines_count })}
-                />
-              </div>
+              <div className="reader-quickset-label">{linesAnchorMeta.label}</div>
+              <Segmented
+                label={linesAnchorMeta.label}
+                value={liveSettings.lines_anchor ?? 'center'}
+                options={linesAnchorMeta.options as ReadonlyArray<{ value: ReaderLinesAnchor; label: string }>}
+                onChange={(lines_anchor) => onQuickSet({ lines_anchor })}
+              />
             </div>
           )}
 

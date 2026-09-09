@@ -3,6 +3,7 @@ import { READER_MIN_VISIBLE_FONT_SIZE } from '../readerDisplayScale'
 import {
   solveReaderLayout,
   measureReaderLayoutContent,
+  rowHeightAtFont,
   type SolveReaderLayoutInput,
 } from '../readerLayoutSolver'
 
@@ -26,6 +27,7 @@ function solve(overrides: Partial<SolveReaderLayoutInput> = {}) {
     wordsPerStack: 3,
     fontSize: 80,
     linesCount: 2,
+    anchor: 'center',
     stackGap: 32,
     rowGap: 8,
     stackVerticalOffset: 0,
@@ -36,6 +38,16 @@ function solve(overrides: Partial<SolveReaderLayoutInput> = {}) {
 }
 
 describe('solveReaderLayout', () => {
+  it('surfaces the solved row height from the shared height formula', () => {
+    expect(rowHeightAtFont(40)).toBe(100)
+    expect(solve({ fontSize: 40 }).effectiveRowHeight).toBe(100)
+  })
+
+  it('returns the resolved anchor alongside the solved geometry', () => {
+    expect(solve({ anchor: 'center' }).anchor).toBe('center')
+    expect(solve({ anchor: 'top' }).anchor).toBe('top')
+  })
+
   it('settles in stage 1 with a comfortable shrink-to-fit font and unchanged settings', () => {
     const result = solve()
 
@@ -87,6 +99,7 @@ describe('solveReaderLayout', () => {
     expect(result.effectiveStackGap).toBe(32)
     expect(result.effectiveRowGap).toBe(0)
     expect(result.effectiveLinesCount).toBe(3)
+    expect(result.effectiveRowHeight).toBe(45)
     expect(result.width).toBeLessThanOrEqual(1000)
     expect(result.height).toBeLessThanOrEqual(150)
   })
@@ -161,6 +174,80 @@ describe('solveReaderLayout', () => {
     expect(withinSlack.clampedVerticalOffset).toBe(-10)
   })
 
+  it('keeps centered vertical offsets within plus or minus half the height slack', () => {
+    const negative = solve({
+      stageHeight: 500,
+      stacksVisible: 1,
+      linesCount: 2,
+      fontSize: 40,
+      rowGap: 0,
+      stackVerticalOffset: -999,
+      measureWidth: measureFixed(100),
+      anchor: 'center',
+    })
+    const positive = solve({
+      stageHeight: 500,
+      stacksVisible: 1,
+      linesCount: 2,
+      fontSize: 40,
+      rowGap: 0,
+      stackVerticalOffset: 999,
+      measureWidth: measureFixed(100),
+      anchor: 'center',
+    })
+    const halfSlack = (500 - negative.height) / 2
+
+    expect(negative.clampedVerticalOffset).toBe(-halfSlack)
+    expect(positive.clampedVerticalOffset).toBe(halfSlack)
+  })
+
+  it('clamps top-anchored offsets to zero through the full height slack', () => {
+    const negative = solve({
+      stageHeight: 500,
+      stacksVisible: 1,
+      linesCount: 2,
+      fontSize: 40,
+      rowGap: 0,
+      stackVerticalOffset: -999,
+      measureWidth: measureFixed(100),
+      anchor: 'top',
+    })
+    const positive = solve({
+      stageHeight: 500,
+      stacksVisible: 1,
+      linesCount: 2,
+      fontSize: 40,
+      rowGap: 0,
+      stackVerticalOffset: 999,
+      measureWidth: measureFixed(100),
+      anchor: 'top',
+    })
+    const slack = 500 - positive.height
+
+    expect(negative.clampedVerticalOffset).toBe(0)
+    expect(negative.clampedVerticalOffset).toBeGreaterThanOrEqual(0)
+    expect(positive.clampedVerticalOffset).toBe(slack)
+    expect(positive.clampedVerticalOffset + positive.height).toBe(500)
+  })
+
+  it('keeps the top-anchored first-row origin fixed across supported line counts', () => {
+    const firstRowOrigins = [2, 3, 5, 8].map((linesCount) => {
+      const layout = solve({
+        stageHeight: 2000,
+        stacksVisible: 1,
+        linesCount,
+        fontSize: 40,
+        rowGap: 8,
+        stackVerticalOffset: 0,
+        measureWidth: measureFixed(100),
+        anchor: 'top',
+      })
+      return layout.clampedVerticalOffset
+    })
+
+    expect(firstRowOrigins).toEqual([0, 0, 0, 0])
+  })
+
   it('passes stacksVisible and wordsPerStack through without mutation', () => {
     const result = solve({
       stageWidth: 360,
@@ -197,6 +284,7 @@ describe('solveReaderLayout', () => {
               wordsPerStack,
               fontSize: 64,
               linesCount,
+              anchor: 'center',
               stackGap: 32,
               rowGap: 8,
               stackVerticalOffset: 100,

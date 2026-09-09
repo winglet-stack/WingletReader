@@ -4,14 +4,14 @@ import {
   isCountdownComplete,
   resolveValidSavedIndex,
   selectSessionBaseline,
+  sessionPersists,
+  shouldCaptureSessionBaseline,
   shouldFireOnce,
+  playbackCanCross,
   shouldFireOnCrossing,
   shouldSavePosition,
   shouldFireComplete,
   shouldStartReadingSession,
-  wordOffsetAtIndex,
-  resolveWordsToStackIndex,
-  resolveRestoreIndex,
   computeResumePct,
   computeMinutesLeft,
 } from '../readerSession'
@@ -87,6 +87,43 @@ describe('shouldStartReadingSession', () => {
   })
 })
 
+describe('shouldCaptureSessionBaseline', () => {
+  it('captures on the rest → playing transition (ADR-0026 §2)', () => {
+    expect(shouldCaptureSessionBaseline('idle', 'playing', false)).toBe(true)
+    expect(shouldCaptureSessionBaseline('stopped', 'playing', false)).toBe(true)
+  })
+
+  it('does not move the baseline for pause/resume inside a session (ADR-0026 §2)', () => {
+    expect(shouldCaptureSessionBaseline('paused', 'playing', false)).toBe(false)
+    expect(shouldCaptureSessionBaseline('playing', 'paused', false)).toBe(false)
+  })
+
+  it('re-captures when playback resumes while a session end is showing (ADR-0026 §4 exception)', () => {
+    // §4 pauses and holds instead of stopping, so the state machine still says
+    // `paused` although the session is over: playing again is a new session and
+    // must get its own baseline, or the next "Exit without saving" would revert
+    // past the run the reader actually wants to discard.
+    expect(shouldCaptureSessionBaseline('paused', 'playing', true)).toBe(true)
+  })
+
+  it('does not fire the exception on any other transition while a session end is showing', () => {
+    expect(shouldCaptureSessionBaseline('playing', 'paused', true)).toBe(false)
+    expect(shouldCaptureSessionBaseline('paused', 'stopped', true)).toBe(false)
+    expect(shouldCaptureSessionBaseline('playing', 'playing', true)).toBe(false)
+  })
+})
+
+describe('sessionPersists', () => {
+  it('persists for a stored text', () => {
+    expect(sessionPersists(7)).toBe(true)
+  })
+
+  it('persists nothing for a text with no id — the Overlay Reader contract', () => {
+    expect(sessionPersists(undefined)).toBe(false)
+    expect(sessionPersists(0)).toBe(false)
+  })
+})
+
 describe('selectSessionBaseline', () => {
   it('uses the saved reading position when one exists', () => {
     expect(selectSessionBaseline({ stackIndex: 4, source: 'text' }, 'segment')).toEqual({
@@ -131,6 +168,15 @@ describe('shouldFireOnce', () => {
   it('does not fire again once it has already fired', () => {
     expect(shouldFireOnce(3, 3, true)).toBe(false)
     expect(shouldFireOnce(4, 3, true)).toBe(false)
+  })
+})
+
+describe('playbackCanCross', () => {
+  it('lets only playback cross a Target (ADR-0024)', () => {
+    expect(playbackCanCross('playing')).toBe(true)
+    expect(playbackCanCross('paused')).toBe(false)
+    expect(playbackCanCross('stopped')).toBe(false)
+    expect(playbackCanCross('idle')).toBe(false)
   })
 })
 
@@ -195,86 +241,12 @@ describe('shouldFireComplete', () => {
   })
 })
 
-describe('wordOffsetAtIndex', () => {
-  const stacks: WordStack[] = [
-    { words: ['one', 'two'], type: 'normal' },
-    { words: ['three'], type: 'normal' },
-    { words: ['four', 'five', 'six'], type: 'normal' },
-  ]
-
-  it('is zero at the start of the text', () => {
-    expect(wordOffsetAtIndex(stacks, 0)).toBe(0)
-  })
-
-  it('sums the words of the stacks before the index', () => {
-    expect(wordOffsetAtIndex(stacks, 1)).toBe(2)
-    expect(wordOffsetAtIndex(stacks, 2)).toBe(3)
-    expect(wordOffsetAtIndex(stacks, 3)).toBe(6)
-  })
-
-  it('clamps an index beyond the stacks to the total word count', () => {
-    expect(wordOffsetAtIndex(stacks, 100)).toBe(6)
-  })
-
-  it('is zero for empty stacks', () => {
-    expect(wordOffsetAtIndex([], 5)).toBe(0)
-  })
-})
-
-describe('resolveWordsToStackIndex', () => {
-  it('returns zero for a start-of-text word offset', () => {
-    const stacks = makeStacks([3, 3, 3])
-    expect(resolveWordsToStackIndex(0, stacks)).toBe(0)
-  })
-
-  it('returns the stack boundary at or after the word offset', () => {
-    const stacks = makeStacks([3, 3, 3])
-    expect(resolveWordsToStackIndex(3, stacks)).toBe(1)
-    expect(resolveWordsToStackIndex(4, stacks)).toBe(2)
-  })
-
-  it('clamps offsets beyond the text to the end', () => {
-    const stacks = makeStacks([3, 3])
-    expect(resolveWordsToStackIndex(100, stacks)).toBe(2)
-  })
-
-  it('returns zero for empty stacks', () => {
-    expect(resolveWordsToStackIndex(5, [])).toBe(0)
-  })
-})
-
-describe('resolveRestoreIndex', () => {
-  // Word counts per stack: [2, 1, 3] → stack start offsets 0, 2, 3; total 6.
-  const stacks: WordStack[] = [
-    { words: ['one', 'two'], type: 'normal' },
-    { words: ['three'], type: 'normal' },
-    { words: ['four', 'five', 'six'], type: 'normal' },
-  ]
-
-  it('restores offset 0 to the first stack', () => {
-    expect(resolveRestoreIndex(0, stacks)).toBe(0)
-  })
-
-  it('restores an offset on a stack boundary to that stack', () => {
-    expect(resolveRestoreIndex(2, stacks)).toBe(1)
-    expect(resolveRestoreIndex(3, stacks)).toBe(2)
-  })
-
-  it('restores a mid-stack offset forward to the next stack start', () => {
-    expect(resolveRestoreIndex(1, stacks)).toBe(1)
-    expect(resolveRestoreIndex(4, stacks)).toBe(2)
-  })
-
-  it('clamps an offset at or past the end to the last stack', () => {
-    expect(resolveRestoreIndex(6, stacks)).toBe(2)
-    expect(resolveRestoreIndex(100, stacks)).toBe(2)
-  })
-
-  it('returns 0 for empty stacks', () => {
-    expect(resolveRestoreIndex(0, [])).toBe(0)
-    expect(resolveRestoreIndex(5, [])).toBe(0)
-  })
-})
+/*
+ * `wordOffsetAtIndex`, `resolveWordsToStackIndex` and `resolveRestoreIndex`
+ * moved onto the word index (`architecture-depth/08`). Their cases live in
+ * `wordIndex.test.ts`, asserted through the index and pinned against these very
+ * expectations.
+ */
 
 describe('computeResumePct', () => {
   it('returns the rounded percentage of the saved index', () => {

@@ -12,6 +12,8 @@ export type HighlightMode = 'default' | 'progressive-bar' | 'panning-bar'
 
 export type HighlightingMode = 'default' | 'progressive'
 
+export type ReaderLinesAnchor = 'center' | 'top'
+
 export interface ReaderPalette {
   id: string
   name: string
@@ -40,7 +42,6 @@ export interface PlaybackPreset {
   bpm: number
   words_per_stack: number
   stacks_visible: number
-  lines_enabled: boolean
   lines_count: number
 }
 
@@ -52,8 +53,9 @@ export interface ReaderConfig {
   bpm: number
   words_per_stack: number
   stacks_visible: number
-  lines_enabled: boolean
   lines_count: number
+  /** Optional only so Profiles saved before ADR-0032 remain representable. */
+  lines_anchor?: ReaderLinesAnchor
   lines_row_gap: number
   metronome_enabled: boolean
   pause_at_sentences: boolean
@@ -92,7 +94,6 @@ export interface TransmutePreset {
   highlightMode: HighlightMode
   highlightPanningChunkSize: number
   highlightingMode: HighlightingMode
-  linesEnabled: boolean
   linesCount: number
   linesRowGap: number
   stacksVisible: number
@@ -131,8 +132,8 @@ export const DEFAULT_SETTINGS = {
   stack_horizontal_offset: 0,
   theme: 'dark' as 'dark' | 'light',
   highlight_active: true,
-  lines_enabled: false,
-  lines_count: 3,
+  lines_count: 1,
+  lines_anchor: 'center' as ReaderLinesAnchor,
   lines_row_gap: 8,
   segmentation_enabled: true,
   segmentation_threshold: 5000,
@@ -170,11 +171,14 @@ export const DEFAULT_SETTINGS = {
   read_while_working_show_standby_control: true,
   read_while_working_standby_x: null as number | null,
   read_while_working_standby_y: null as number | null,
+  // Reading goals (ADR-0035 §5). Stored in words; the UI sets and shows quota
+  // pages of QUOTA_PAGE_WORDS, so the default 1000 reads as "2 pages/day".
+  daily_word_quota: 1000,
+  weekly_quota_days: 5,
   rww_bpm: 60,
   rww_words_per_stack: 3,
   rww_stacks_visible: 1,
-  rww_lines_enabled: false,
-  rww_lines_count: 2,
+  rww_lines_count: 1,
   rww_font_size: 36,
   custom_rww_playback_presets: [] as PlaybackPreset[],
   custom_palettes: [] as ReaderPalette[],
@@ -192,6 +196,7 @@ export const DEFAULT_SETTINGS = {
  * as optional by renderer code that constructs partial settings objects.
  */
 type OptionalSettingKeys =
+  | 'lines_anchor'
   | 'read_while_working_enabled'
   | 'read_while_working_shortcut'
   | 'read_while_working_exit_shortcut'
@@ -204,7 +209,6 @@ type OptionalSettingKeys =
   | 'rww_bpm'
   | 'rww_words_per_stack'
   | 'rww_stacks_visible'
-  | 'rww_lines_enabled'
   | 'rww_lines_count'
   | 'rww_font_size'
   | 'custom_rww_playback_presets'
@@ -214,6 +218,28 @@ type RawSettings = typeof DEFAULT_SETTINGS
 
 export type Settings = Omit<RawSettings, OptionalSettingKeys> &
   Partial<Pick<RawSettings, OptionalSettingKeys>>
+
+export function effectiveLinesCount(
+  settings: Pick<Settings, 'lines_count'>
+): number {
+  return Math.max(1, settings.lines_count)
+}
+
+/**
+ * Resolves the stored line-box anchor for rendering. Top anchoring is inert at
+ * one effective line, while the stored preference remains untouched (ADR-0032).
+ */
+export function resolvedLinesAnchor(
+  settings: Pick<Settings, 'lines_count' | 'lines_anchor'>
+): ReaderLinesAnchor {
+  return effectiveLinesCount(settings) > 1 ? (settings.lines_anchor ?? 'center') : 'center'
+}
+
+export function linesCountPatch(
+  linesCount: number
+): Pick<Settings, 'lines_count'> {
+  return { lines_count: linesCount }
+}
 
 // ── Mode-scoped settings store (ADR-0008) ────────────────────────────────────
 //
@@ -243,7 +269,9 @@ const GLOBAL_SETTING_KEYS = [
   'chunk_rule_names',
   'chunk_rule_headlines',
   'read_while_working_enabled',
-  'custom_transmute_presets'
+  'custom_transmute_presets',
+  'daily_word_quota',
+  'weekly_quota_days'
 ] as const
 
 /** The full Standard Reader field set (playback + display + reader presets). */
@@ -259,8 +287,8 @@ const READER_SETTING_KEYS = [
   'stack_vertical_offset',
   'stack_horizontal_offset',
   'highlight_active',
-  'lines_enabled',
   'lines_count',
+  'lines_anchor',
   'lines_row_gap',
   'view_style',
   'show_chunk_dividers',
@@ -308,7 +336,6 @@ export const RWW_OVERRIDE_FLAT_TO_READER = {
   rww_bpm: 'bpm',
   rww_words_per_stack: 'words_per_stack',
   rww_stacks_visible: 'stacks_visible',
-  rww_lines_enabled: 'lines_enabled',
   rww_lines_count: 'lines_count',
   rww_font_size: 'font_size'
 } as const
@@ -352,7 +379,7 @@ const RWW_READER_FIELDS = Object.values(RWW_OVERRIDE_FLAT_TO_READER) as (keyof R
  * After seeding, every {@link RWW_READER_FIELDS} entry is present in `rww`, so
  * the resolver's `rww[field] ?? reader[field]` fallback (ADR-0008, unchanged)
  * never fires for RWW. This realises ADR-0014 §5's independent-config amendment
- * without touching the storage shape, the resolver, or the six frozen `rww_*`
+ * without touching the storage shape, the resolver, or the five frozen `rww_*`
  * projection keys: editing Standard Reader no longer bleeds into RWW because RWW
  * now owns explicit values, re-seeded losslessly on every load/save.
  */
@@ -410,6 +437,44 @@ function looksLikeStore(raw: unknown): raw is Partial<Record<keyof SettingsStore
   )
 }
 
+const LEGACY_LINE_COLLECTION_KEYS = [
+  'custom_reader_configs',
+  'custom_playback_presets',
+  'custom_rww_playback_presets',
+] as const
+
+/** Pays the ADR-0032 compatibility debt without changing the rendered row count. */
+function migrateLegacyLineSettingsBody(raw: unknown): unknown {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return raw
+  const migrated = { ...(raw as Record<string, unknown>) }
+
+  if (migrated.lines_enabled === false) migrated.lines_count = 1
+  delete migrated.lines_enabled
+
+  if (migrated.rww_lines_enabled === false) migrated.rww_lines_count = 1
+  delete migrated.rww_lines_enabled
+
+  for (const key of LEGACY_LINE_COLLECTION_KEYS) {
+    if (Array.isArray(migrated[key])) {
+      migrated[key] = migrated[key].map(migrateLegacyLineSettingsBody)
+    }
+  }
+  return migrated
+}
+
+function migrateLegacyLineSettingsInput(raw: unknown): unknown {
+  if (!looksLikeStore(raw)) return migrateLegacyLineSettingsBody(raw)
+  const migrated = { ...(raw as Record<string, unknown>) }
+  for (const mode of ['global', 'reader', 'rww'] as const) {
+    migrated[mode] = migrateLegacyLineSettingsBody(migrated[mode])
+  }
+  const rww = migrated.rww as Record<string, unknown> | undefined
+  if (rww && rww.lines_count === undefined && rww.rww_lines_count !== undefined) {
+    rww.lines_count = rww.rww_lines_count
+  }
+  return migrated
+}
+
 /** Collapses a nested store-shaped object into a single flat settings object. */
 function flattenNestedRaw(raw: Partial<Record<keyof SettingsStore, unknown>>): Record<string, unknown> {
   const global = (raw.global ?? {}) as Record<string, unknown>
@@ -452,7 +517,8 @@ function splitSettingsToStore(settings: Settings): SettingsStore {
  * losslessly because validation funnels through `parseSettings`.
  */
 export function settingsStoreFromFlat(raw: unknown): SettingsStore {
-  const flatInput = looksLikeStore(raw) ? flattenNestedRaw(raw) : raw
+  const migrated = migrateLegacyLineSettingsInput(raw)
+  const flatInput = looksLikeStore(migrated) ? flattenNestedRaw(migrated) : migrated
   // Seed `rww` into a complete independent set on every load (ADR-0014 §5). The
   // seed is idempotent + lossless, so this also serves as the one-time migration
   // for existing users without a version flag.
@@ -461,10 +527,11 @@ export function settingsStoreFromFlat(raw: unknown): SettingsStore {
 
 /** Projects a store back to the flat `Settings` shape every consumer expects. */
 export function flattenSettingsStore(store: SettingsStore): Settings {
+  const normalized = migrateLegacyLineSettingsInput(store) as SettingsStore
   const flat: Record<string, unknown> = { ...DEFAULT_SETTINGS }
-  for (const key of GLOBAL_SETTING_KEYS) flat[key] = (store.global as Record<string, unknown>)[key]
-  for (const key of READER_SETTING_KEYS) flat[key] = (store.reader as Record<string, unknown>)[key]
-  const rww = store.rww as Record<string, unknown>
+  for (const key of GLOBAL_SETTING_KEYS) flat[key] = (normalized.global as Record<string, unknown>)[key]
+  for (const key of READER_SETTING_KEYS) flat[key] = (normalized.reader as Record<string, unknown>)[key]
+  const rww = normalized.rww as Record<string, unknown>
   for (const key of RWW_ONLY_KEYS) {
     if (rww[key] !== undefined) flat[key] = rww[key]
   }
@@ -491,7 +558,6 @@ const RWW_INHERIT_KEYS: ReadonlySet<string> = new Set([
   'rww_bpm',
   'rww_words_per_stack',
   'rww_stacks_visible',
-  'rww_lines_enabled',
   'rww_lines_count',
   'rww_font_size',
 ])
@@ -504,6 +570,8 @@ const POSITIVE_FLOOR_KEYS: ReadonlySet<string> = new Set([
   'live_rewind_stacks',
   'rww_bpm',
   'rww_words_per_stack',
+  // A zero quota would make every day trivially "met" (ADR-0035 §5).
+  'daily_word_quota',
 ])
 
 const NULLABLE_NUMBER_KEYS: ReadonlySet<string> = new Set([
@@ -539,8 +607,11 @@ function resolveStoredValue(
  * back to the main-reader value for users who have never touched those overrides.
  */
 export function parseSettings(raw: unknown): Settings {
+  const migrated = migrateLegacyLineSettingsBody(raw)
   const input =
-    typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>) : {}
+    typeof migrated === 'object' && migrated !== null
+      ? (migrated as Record<string, unknown>)
+      : {}
 
   const result: Record<string, unknown> = {}
   for (const key of Object.keys(DEFAULT_SETTINGS) as (keyof RawSettings)[]) {

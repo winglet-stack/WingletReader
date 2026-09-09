@@ -1,6 +1,7 @@
 import React from 'react'
 import type { Settings } from '../../types'
 import NumericInput from '../NumericInput'
+import { effectiveLinesCount } from '../../../../shared/settings'
 
 interface Props {
   local: Settings
@@ -8,6 +9,8 @@ interface Props {
 }
 
 export default function AlignmentSection({ local, update }: Props) {
+  const multipleLines = effectiveLinesCount(local) > 1
+
   return (
     <section className="settings-section">
       <h2 className="settings-heading">Alignment</h2>
@@ -27,14 +30,14 @@ export default function AlignmentSection({ local, update }: Props) {
             value={local.lines_row_gap}
             onChange={(e) => update({ lines_row_gap: Number(e.target.value) })}
             className="range-slider"
-            disabled={!local.lines_enabled}
+            disabled={!multipleLines}
           />
           <NumericInput
             value={local.lines_row_gap}
             min={0}
             max={64}
             step={4}
-            disabled={!local.lines_enabled}
+            disabled={!multipleLines}
             onCommit={(lines_row_gap) => update({ lines_row_gap })}
             ariaLabel="Vertical line spacing value"
           />

@@ -1,4 +1,5 @@
 import type { BrowserWindow } from 'electron'
+import { readWhileWorkingChannelContract } from '../shared/channelContract'
 
 export function sendRendererEvent(
   win: BrowserWindow | null,
@@ -20,9 +21,9 @@ export function sendRendererEvent(
 }
 
 export function sendNavigateHome(mainWindow: BrowserWindow | null): void {
-  sendRendererEvent(mainWindow, 'rww:exited')
+  sendRendererEvent(mainWindow, readWhileWorkingChannelContract.onExited.channel)
 }
 
 export function sendEnableFailed(mainWindow: BrowserWindow | null, error: string): void {
-  sendRendererEvent(mainWindow, 'rww:enableFailed', { error })
+  sendRendererEvent(mainWindow, readWhileWorkingChannelContract.onEnableFailed.channel, { error })
 }

@@ -7,6 +7,7 @@ export default function StackDisplay({
   textOverflow = false,
 }: {
   stack: WordStack
+  /** Resolved slot font size from the reader frame — headline scaling already applied. */
   fontSize: number
   isHeadline: boolean
   /** When true, applies white-space:nowrap + text-overflow:ellipsis to prevent
@@ -19,7 +20,7 @@ export default function StackDisplay({
     return (
       <div
         className={`stack-headline${textOverflow ? ' stack-headline--overflow' : ''}`}
-        style={{ fontSize: Math.round(fontSize * 0.7) }}
+        style={{ fontSize }}
       >
         <div className="headline-rule" />
         <span>{text}</span>

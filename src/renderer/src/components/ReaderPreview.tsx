@@ -1,5 +1,6 @@
 import React from 'react'
 import type { Settings } from '../types'
+import { effectiveLinesCount, resolvedLinesAnchor } from '../../../shared/settings'
 import StackPreviewGrid from './StackPreviewGrid'
 
 interface Props {
@@ -27,8 +28,6 @@ export default function ReaderPreview({ settings, showChunkDividers }: Props) {
     stack_gap,
     stack_vertical_offset,
     stack_horizontal_offset = 0,
-    lines_enabled,
-    lines_count,
     lines_row_gap,
     words_per_stack,
   } = settings
@@ -49,8 +48,8 @@ export default function ReaderPreview({ settings, showChunkDividers }: Props) {
         stackGap={stack_gap}
         stackVerticalOffset={stack_vertical_offset}
         stackHorizontalOffset={stack_horizontal_offset}
-        linesEnabled={lines_enabled}
-        linesCount={lines_count}
+        linesCount={effectiveLinesCount(settings)}
+        linesAnchor={resolvedLinesAnchor(settings)}
         linesRowGap={lines_row_gap}
         wordsPerStack={words_per_stack}
         offsetScale={0.25}

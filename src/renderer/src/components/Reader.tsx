@@ -5,26 +5,26 @@ import { useReader } from '../contexts/ReaderContext'
 import logoModernSrc from '../assets/logo-modern.png'
 import libraryToggleDarkSrc from '../assets/reader-tiles/library-toggle-dark.png'
 import libraryToggleLightSrc from '../assets/reader-tiles/library-toggle-light.png'
-import { usePlayback } from '../hooks/usePlayback'
-import { useReadingSessionLifecycle } from '../hooks/useReadingSessionLifecycle'
+import { useReadingSession } from '../hooks/useReadingSession'
+import { useReaderSurfaces } from '../hooks/useReaderSurfaces'
+import { useSessionStatsSummary } from '../hooks/useSessionStatsSummary'
+import { useBookmarkCollection } from '../hooks/useBookmarkCollection'
 import { computePlainTextContext } from '../engine/plainTextContext'
 import { useTextPaging } from '../engine/useTextPaging'
-import { computeHighlightedSlots } from '../engine/highlightingEngine'
 import { autoTextColor, resolveHighlightTextColor } from '../engine/highlightColor'
 import { buildReaderCssVars } from '../engine/readerCssVars'
-import { READER_MIN_VISIBLE_FONT_SIZE, createMeasureWidth } from '../engine/readerDisplayScale'
-import { solveReaderLayout, type SolveReaderLayoutResult } from '../engine/readerLayoutSolver'
-import { wordOffsetAtIndex, computeMinutesLeft, resolveWordsToStackIndex } from '../engine/readerSession'
+import { useReaderFrame } from '../hooks/useReaderFrame'
+import type { ReaderFrameConfig } from '../engine/readerFrame'
+import { computeMinutesLeft, type SessionCompletion } from '../engine/readerSession'
+import { displayRenditionOf } from '../engine/wordIndex'
+import { useTextWordIndex, useWordIndex } from '../hooks/useWordIndex'
 import { resolveReaderKeyAction } from '../engine/readerKeymap'
+import { isStageLeftHalf, resolveStageMouseClick } from '../engine/readerBindings'
+import type { Settings } from '../types'
 import {
-  isStageLeftHalf,
-  mouseEventMatchesBinding,
-  resolveStageMouseClick,
-  tapToReadStageMouseAction,
-} from '../engine/readerBindings'
-import { deriveBlockPosition, panningBarRevealUpToSlot, nextRevealState, buildDisplayRows, buildGridTemplateColumns } from '../engine/stackLayout'
-import type { RevealState } from '../engine/stackLayout'
-import type { Bookmark, Settings } from '../types'
+  effectiveLinesCount as getEffectiveLinesCount,
+  resolvedLinesAnchor,
+} from '../../../shared/settings'
 import BookmarkPopover from './reader/BookmarkPopover'
 import QuickSettingsPopover from './reader/QuickSettingsPopover'
 import ReaderTopbar from './reader/ReaderTopbar'
@@ -46,8 +46,12 @@ interface Props {
   onExitToLibrary: () => void
   /** Label used for the top-left exit button. */
   backLabel?: string
-  /** Disabled for TemporaryReaderApp so its existing completion/close path stays unchanged. */
-  sessionEndEnabled?: boolean
+  /**
+   * Which completion path a finished reading run takes in this host. The
+   * standard Reader shows the guided Session dialog (ADR-0026); the Overlay
+   * Reader keeps its own completion/close path, so it selects `host-completion`.
+   */
+  completion?: SessionCompletion
   /** Standard Reader only; TemporaryReaderApp/RWW must not expose library browse. */
   libraryBrowseEnabled?: boolean
 }
@@ -76,11 +80,18 @@ function ReaderBrowseToggle({
 }
 
 
+// What is left here is **size**, not coordination: the props-in/JSX-out body of a
+// large screen. The session (ADR-0026), the surface exclusion and the Target-pick
+// mode all live behind their own interfaces now; the guard still measures this
+// function because it renders the whole reader in one place. That is the
+// `codebase-health` cascade's target, not `architecture-depth`'s — do not widen
+// the global 20/15/30 ceilings for it.
+// fallow-ignore-next-line complexity
 export default function Reader({
   onBack,
   onExitToLibrary,
   backLabel = 'Library',
-  sessionEndEnabled = true,
+  completion = 'session-dialog',
   libraryBrowseEnabled = true,
 }: Props) {
   const { activeText } = useLibrary()
@@ -88,7 +99,8 @@ export default function Reader({
   const {
     activeSegmentCtx: segmentCtx,
     readerRereReadEnd: rereReadEndIndex,
-    readerResumeFrom: resumeFromIndex,
+    readerResumeFrom: savedResumeFromIndex,
+    readerResumeFromWordOffset: resumeFromWordOffset,
     readerConfigDrawerOpen,
     setReaderConfigDrawerOpen,
     refreshResumeCandidate,
@@ -98,244 +110,114 @@ export default function Reader({
   const text = activeText!
 
   const logoSrc = logoModernSrc
-  const content = text?.content ?? ''
-  const displayContent = (text?.content_display ?? content).replace(/\f/g, '\n\n')
+  // The rendition the words are read from — the same expression the bookmark
+  // snippets used to compute separately (`architecture-depth/08`).
+  const displayContent = displayRenditionOf(text ?? { content: '' })
 
   // Live settings shadow — initialized once from props, mutated by the quick-settings panel.
-  // Passed to usePlayback so changes take effect immediately without a full re-mount.
+  // Passed to the session so changes take effect immediately without a full re-mount.
   const [liveSettings, setLiveSettings] = useState<Settings>(settings)
 
-  const {
-    stacks,
-    currentIndex,
-    state,
-    wpm,
-    progress,
-    play,
-    playFrom,
-    pause,
-    resume,
-    stop,
-    pauseAndHold,
-    discardToStart,
-    restart,
-    rewind,
-    seekTo,
-    naturalEndRevision,
-    stepForward,
-  } = usePlayback({
-    text: content,
-    settings: liveSettings,
-    pauseOnNaturalEnd: sessionEndEnabled,
-  })
-
-  const stageRef = useRef<HTMLDivElement | null>(null)
   const [stageNode, setStageNode] = useState<HTMLDivElement | null>(null)
-  // Tracks the maximum revealed slot index for the current row — prevents content
-  // from disappearing when the highlight mode is changed mid-row.
-  const revealStateRef = useRef<RevealState>({ lineKey: -1, revealUpTo: 0 })
   const [tapHoverSide, setTapHoverSide] = useState<'left' | 'right' | null>(null)
 
   const [isFullscreen, setIsFullscreen] = useState(false)
   const [showFsControls, setShowFsControls] = useState(false)
   const [stageDims, setStageDims] = useState({ width: 0, height: 0 })
-  const [showPlainText, setShowPlainText] = useState(false)
-  const [textViewMode, setTextViewMode] = useState<'plain' | 'source'>('plain')
-  const [goalPickArmed, setGoalPickArmed] = useState(false)
-  const [goalPickDraft, setGoalPickDraft] = useState<{ wordOffset: number | null; customLabel: string } | null>(null)
-  const [returnFromSessionTargetPick, setReturnFromSessionTargetPick] = useState(false)
-  const [browsing, setBrowsing] = useState(false)
-  const [bookmarks, setBookmarks] = useState<Bookmark[]>([])
-  const [goalBookmark, setGoalBookmark] = useState<Bookmark | null>(null)
-  const [consumedGoalBookmarkId, setConsumedGoalBookmarkId] = useState<number | null>(null)
-  const [manualSeekRevision, setManualSeekRevision] = useState(0)
-  const [textLocateRevision, setTextLocateRevision] = useState(0)
-  const [fontReadyRevision, setFontReadyRevision] = useState(0)
   const plainTextContentRef = useRef<HTMLPreElement | null>(null)
 
-  const setReaderStageRef = useCallback((node: HTMLDivElement | null) => {
-    stageRef.current = node
-    setStageNode(node)
-  }, [])
+  // The engaged text's bookmarks (ADR-0024). The Reader owns the list: the
+  // scrubber marks it, the Text view decorates from it, the session is handed
+  // its Target, and the popover renders and mutates it. Nothing is pushed back
+  // up (`architecture-depth/12`).
+  const bookmarks = useBookmarkCollection({ textId: text?.id })
 
-  // ── Quick-settings panel ───────────────────────────────────────────────────
-
-  const [showQuickSettings, setShowQuickSettings] = useState(false)
-  // ── Reading position tracking ──────────────────────────────────────────────
-
- 
-
-  // ── Countdown before resuming ──────────────────────────────────────────────
-
- 
-
-  // ── Bookmarks ──────────────────────────────────────────────────────────────
-
- 
-
- 
-
- 
-
-  const handleGoalBookmarkConsumed = useCallback((bookmarkId: number) => {
-    setGoalBookmark((current) => current?.id === bookmarkId ? null : current)
-    setConsumedGoalBookmarkId(bookmarkId)
-  }, [])
-
-  const handleManualSeekTo = useCallback((index: number) => {
-    setManualSeekRevision((revision) => revision + 1)
-    seekTo(index)
-  }, [seekTo])
-
-  // One deep lifecycle hook: resume, saved position, goal/reread auto-stop, complete, and retokenize restore.
-  const {
-    countdown,
-    showBookmarkPopover,
-    validSavedIndex,
-    resumePct,
-    setShowBookmarkPopover,
-    stopReading,
-    handlePlay,
-    handleResume,
-    handleRestart,
-    handleBeforeRetokenize,
-    commitCurrentPosition,
-    revertToBaseline,
-    discardToStart: resetDiscardedSession,
-    sessionEnd,
-    clearSessionEnd,
-  } = useReadingSessionLifecycle({
+  // One reading session (ADR-0026): the playback timer and index, the resume
+  // countdown, the position saves, the session baseline, goal crossing and the
+  // natural end — all behind one interface (`architecture-depth/11`).
+  const session = useReadingSession({
     text,
-    stacks,
-    currentIndex,
-    playState: state,
+    settings: liveSettings,
     segmentCtx,
-    resumeFromIndex,
+    completion,
     rereReadEndIndex,
-    goalBookmark,
-    manualSeekRevision,
-    naturalEndRevision,
-    sessionEndEnabled,
-    play,
-    playFrom,
-    pause,
-    stop,
-    pauseAndHold,
-    discardToStart,
-    onGoalBookmarkConsumed: handleGoalBookmarkConsumed,
+    goalBookmark: bookmarks.goalBookmark,
+    resumeFromIndex: savedResumeFromIndex,
+    resumeFromWordOffset,
     onResumeHandled,
+    onGoalBookmarkConsumed: bookmarks.forget,
     onReadingComplete,
     refreshResumeCandidate,
   })
+  const {
+    stacks,
+    stackIndex,
+    currentIndex,
+    playState,
+    wpm,
+    progress,
+    countdown,
+    sessionEnd,
+    validSavedIndex,
+    resumePct,
+  } = session
+
+  // ADR-0035 §6: the finished session's own numbers ride the session interface,
+  // so only the baseline is fetched — and only while the dialog is up.
+  const sessionStats = useSessionStatsSummary(sessionEnd ? session.finishedSessionStats : null)
+
+  // One owner of which surface is open — quick settings, the bookmark popover,
+  // the config drawer, the plain-text view, library browse — and of the
+  // Target-pick mode that spans two of them (`architecture-depth/12`).
+  const surfaces = useReaderSurfaces({
+    text,
+    configDrawerOpen: readerConfigDrawerOpen,
+    setConfigDrawerOpen: setReaderConfigDrawerOpen,
+    pause: session.pause,
+    dismissSessionEnd: session.dismissSessionEnd,
+  })
 
   const handleBack = useCallback(() => {
-    void commitCurrentPosition()
+    void session.commit()
     onBack()
-  }, [commitCurrentPosition, onBack])
+  }, [session, onBack])
 
   const handleSessionDialogSaveExit = useCallback(() => {
-    void commitCurrentPosition().then(() => {
-      clearSessionEnd()
+    void session.commit().then(() => {
+      session.dismissSessionEnd()
       onExitToLibrary()
     })
-  }, [clearSessionEnd, commitCurrentPosition, onExitToLibrary])
+  }, [session, onExitToLibrary])
 
   const handleSessionDialogExitWithoutSaving = useCallback(() => {
-    void revertToBaseline().then(() => {
-      resetDiscardedSession()
-      clearSessionEnd()
+    void session.discard().then(() => {
       onExitToLibrary()
     })
-  }, [clearSessionEnd, onExitToLibrary, resetDiscardedSession, revertToBaseline])
+  }, [session, onExitToLibrary])
 
   const handleSessionDialogDismiss = useCallback(() => {
-    clearSessionEnd()
-  }, [clearSessionEnd])
+    session.dismissSessionEnd()
+  }, [session])
 
-  const handleQuickSettingsOpenChange = useCallback((open: boolean) => {
-    if (open) setShowBookmarkPopover(false)
-    setShowQuickSettings(open)
-  }, [setShowBookmarkPopover])
-
-  const handleBookmarkOpenChange = useCallback((open: boolean) => {
-    if (open) setShowQuickSettings(false)
-    if (!open) {
-      setGoalPickArmed(false)
-      setGoalPickDraft(null)
-      if (returnFromSessionTargetPick) {
-        setReturnFromSessionTargetPick(false)
-        setShowPlainText(false)
-      }
-    }
-    setShowBookmarkPopover(open)
-  }, [returnFromSessionTargetPick, setShowBookmarkPopover])
-
-  const handleArmGoalPick = useCallback((customLabel: string) => {
-    pause()
-    setShowBookmarkPopover(true)
-    setShowQuickSettings(false)
-    setReaderConfigDrawerOpen(false)
-    setBrowsing(false)
-    setShowPlainText(true)
-    setTextViewMode('plain')
-    setGoalPickDraft({ wordOffset: null, customLabel: customLabel.trim() })
-    setGoalPickArmed(true)
-  }, [pause, setReaderConfigDrawerOpen, setShowBookmarkPopover])
-
+  /** ADR-0026's "Set a new target": one intent, and the mode owns the rest. */
   const handleSessionDialogSetNewTarget = useCallback(() => {
-    clearSessionEnd()
-    setReturnFromSessionTargetPick(true)
-    handleArmGoalPick('')
-  }, [clearSessionEnd, handleArmGoalPick])
+    surfaces.armGoalPick('', 'session-dialog')
+  }, [surfaces])
 
-  const handleCancelGoalPick = useCallback(() => {
-    setGoalPickArmed(false)
-    setGoalPickDraft(null)
-    if (returnFromSessionTargetPick) {
-      setReturnFromSessionTargetPick(false)
-      setShowBookmarkPopover(false)
-      setShowPlainText(false)
-    }
-  }, [returnFromSessionTargetPick, setShowBookmarkPopover])
-
-  const handleGoalWordPick = useCallback((wordOffset: number) => {
-    setGoalPickArmed(false)
-    setGoalPickDraft((draft) => ({
-      wordOffset,
-      customLabel: draft?.customLabel ?? '',
-    }))
-    setShowQuickSettings(false)
-    setShowBookmarkPopover(true)
-  }, [setShowBookmarkPopover])
-
-  // Picking any library text returns the stage to reading.
-  useEffect(() => { setBrowsing(false) }, [activeText])
+  // ADR-0035 §2: a pause during which the user opens a reader surface is setup,
+  // not struggle — every move into an open surface (including the auto-pausing
+  // ones: browse entry, arming a Target pick) exempts the current pause span.
+  const { noteSetupActivity } = session
   useEffect(() => {
-    setGoalPickArmed(false)
-    setGoalPickDraft(null)
-    setReturnFromSessionTargetPick(false)
-    setTextViewMode('plain')
-  }, [activeText])
-  useEffect(() => {
-    if (!showPlainText) {
-      setGoalPickArmed(false)
-      setReturnFromSessionTargetPick(false)
-      setTextViewMode('plain')
+    if (
+      surfaces.panel !== 'none' ||
+      surfaces.browsing ||
+      surfaces.textViewOpen ||
+      surfaces.goalPickArmed
+    ) {
+      noteSetupActivity()
     }
-  }, [showPlainText])
-
-  const toggleBrowse = useCallback(() => {
-    setBrowsing((wasBrowsing) => {
-      if (!wasBrowsing) {
-        pause()
-        setShowPlainText(false)
-        setShowQuickSettings(false)
-        setShowBookmarkPopover(false)
-        setReaderConfigDrawerOpen(false)
-      }
-      return !wasBrowsing
-    })
-  }, [pause, setReaderConfigDrawerOpen, setShowBookmarkPopover])
+  }, [surfaces.panel, surfaces.browsing, surfaces.textViewOpen, surfaces.goalPickArmed, noteSetupActivity])
 
   // ── Stage resize observer ──────────────────────────────────────────────────
 
@@ -350,18 +232,6 @@ export default function Reader({
     ro.observe(stageNode)
     return () => ro.disconnect()
   }, [stageNode])
-
-  useEffect(() => {
-    const fontReady = document.fonts?.ready
-    if (!fontReady || typeof fontReady.then !== 'function') return
-
-    let cancelled = false
-    fontReady.then(() => {
-      if (!cancelled) setFontReadyRevision((revision) => revision + 1)
-    }).catch(() => {})
-
-    return () => { cancelled = true }
-  }, [liveSettings.font_family])
 
   const toggleFullscreen = useCallback(() => {
     if (!document.fullscreenElement) {
@@ -396,8 +266,13 @@ export default function Reader({
   const plainTextCtx = computePlainTextContext(text, currentIndex, stacks, segmentCtx)
   // The plain paged Text view is the only surface that needs paging; gate the
   // hook's whole-book scan on it so RSVP engage never pays for it (OL-1).
-  const pagedPlainActive = showPlainText && textViewMode === 'plain'
-  const textPaging = useTextPaging(displayContent, plainTextCtx.wordOffset, pagedPlainActive)
+  const pagedPlainActive = surfaces.textViewOpen && surfaces.textViewMode === 'plain'
+  // The text half is the whole-book walk, so it waits for a surface that
+  // actually needs words: the paged plain view, or the bookmark popover with
+  // its snippets. RSVP engage pays for neither (OL-1).
+  const textIndex = useTextWordIndex(displayContent, pagedPlainActive || surfaces.bookmarksOpen)
+  const wordIndex = useWordIndex(stackIndex, textIndex)
+  const textPaging = useTextPaging(textIndex, plainTextCtx.wordOffset)
 
   // Keyboard shortcuts: the decision table lives in engine/readerKeymap.ts;
   // this handler only builds the input and dispatches the side effects.
@@ -411,14 +286,14 @@ export default function Reader({
         tapToReadKey: liveSettings.tap_to_read_key,
         liveRewindKey: liveSettings.live_rewind_key ?? 'Mouse1',
         liveRewindStacks: liveSettings.live_rewind_stacks ?? 1,
-        playState: state,
+        playState,
         hasSavedIndex: validSavedIndex !== null,
         isFullscreen,
         showFsControls,
-        showBookmarkPopover,
-        goalPickArmed,
-        showReaderConfigDrawer: readerConfigDrawerOpen,
-        showQuickSettings,
+        showBookmarkPopover: surfaces.bookmarksOpen,
+        goalPickArmed: surfaces.goalPickArmed,
+        showReaderConfigDrawer: surfaces.configDrawerOpen,
+        showQuickSettings: surfaces.quickSettingsOpen,
         pagedPlainActive,
       })
       if (!action) return
@@ -426,38 +301,37 @@ export default function Reader({
 
       switch (action.type) {
         case 'advance':
-          stepForward()
+          session.step()
           break
         case 'pause':
-          pause()
+          session.pause()
           break
         case 'resume':
-          resume()
+          session.resume()
           break
         case 'resume-saved':
-          handleResume()
+          session.resumeSaved()
           break
         case 'play':
-          handlePlay()
+          session.play()
           break
         case 'restart':
-          handleRestart()
-          restart()
+          session.restart()
           break
         case 'toggle-fs-controls':
           setShowFsControls((v) => !v)
           break
         case 'cancel-goal-pick':
-          handleCancelGoalPick()
+          surfaces.leaveGoalPick()
           break
         case 'close-bookmark-popover':
-          handleBookmarkOpenChange(false)
+          surfaces.openBookmarks(false)
           break
         case 'close-reader-config-drawer':
-          setReaderConfigDrawerOpen(false)
+          surfaces.openConfigDrawer(false)
           break
         case 'close-quick-settings':
-          setShowQuickSettings(false)
+          surfaces.openQuickSettings(false)
           break
         case 'hide-fs-controls':
           setShowFsControls(false)
@@ -466,22 +340,22 @@ export default function Reader({
           document.exitFullscreen().catch(() => {})
           break
         case 'stop-reading':
-          stopReading()
+          session.stop()
           break
         case 'toggle-fullscreen':
           toggleFullscreen()
           break
         case 'toggle-plain-text':
-          setShowPlainText((v) => !v)
+          surfaces.toggleTextView()
           break
         case 'rewind':
-          rewind(action.amount)
+          session.rewind(action.amount)
           break
         case 'live-rewind':
-          rewind(action.amount)
+          session.rewind(action.amount)
           break
         case 'seek-forward':
-          handleManualSeekTo(Math.min(stacks.length - 1, currentIndex + action.amount))
+          session.seekTo(Math.min(stacks.length - 1, currentIndex + action.amount))
           break
         case 'page-prev':
           textPaging.goPrev()
@@ -491,23 +365,22 @@ export default function Reader({
           break
       }
     },
-    [state, handlePlay, handleResume, handleRestart, pause, resume, stopReading, restart, rewind, handleManualSeekTo, stepForward,
-     stacks.length, currentIndex, toggleFullscreen, validSavedIndex, showQuickSettings, showBookmarkPopover,
-     readerConfigDrawerOpen, setReaderConfigDrawerOpen, isFullscreen, showFsControls,
+    [session, surfaces, playState,
+     stacks.length, currentIndex, toggleFullscreen, validSavedIndex,
+     isFullscreen, showFsControls,
      liveSettings.tap_to_read, liveSettings.tap_to_read_key, liveSettings.live_rewind_key,
-     setShowBookmarkPopover, handleBookmarkOpenChange,
      liveSettings.live_rewind_stacks,
-     showPlainText, textViewMode, pagedPlainActive, textPaging, goalPickArmed, handleCancelGoalPick]
+     pagedPlainActive, textPaging]
   )
 
   const handleLiveRewind = useCallback(() => {
-    rewind(liveSettings.live_rewind_stacks ?? 1)
-  }, [rewind, liveSettings.live_rewind_stacks])
+    session.rewind(liveSettings.live_rewind_stacks ?? 1)
+  }, [session, liveSettings.live_rewind_stacks])
 
   const handleStageMouseDown = useCallback(
     (e: React.MouseEvent<HTMLDivElement>) => {
       const action = resolveStageMouseClick({
-        playState: state,
+        playState,
         countdownActive: countdown !== null,
         tapToRead: liveSettings.tap_to_read,
         liveRewindKey: liveSettings.live_rewind_key ?? 'Mouse1',
@@ -517,29 +390,29 @@ export default function Reader({
         mouseEvent: e.nativeEvent,
       })
       if (action === 'rewind') handleLiveRewind()
-      else if (action === 'advance') stepForward()
+      else if (action === 'advance') session.step()
       if (action) e.preventDefault()
     },
     [
-      state,
+      playState,
       countdown,
       liveSettings.tap_to_read,
       liveSettings.live_rewind_key,
       handleLiveRewind,
-      stepForward,
+      session,
     ]
   )
 
   const handleStageMouseMove = useCallback(
     (e: React.MouseEvent<HTMLDivElement>) => {
-      if (!liveSettings.tap_to_read || state !== 'playing') {
+      if (!liveSettings.tap_to_read || playState !== 'playing') {
         setTapHoverSide(null)
         return
       }
       const rect = e.currentTarget.getBoundingClientRect()
       setTapHoverSide(isStageLeftHalf(e.clientX, rect) ? 'left' : 'right')
     },
-    [liveSettings.tap_to_read, state]
+    [liveSettings.tap_to_read, playState]
   )
 
   const handleStageMouseLeave = useCallback(() => {
@@ -551,172 +424,115 @@ export default function Reader({
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [handleKeyDown])
 
-  const stacksVisible = liveSettings.stacks_visible
-  const configuredLinesCount = liveSettings.lines_enabled ? Math.max(1, liveSettings.lines_count) : 1
-  const configuredBlock = deriveBlockPosition(currentIndex, stacksVisible, configuredLinesCount)
-  const configuredBlockSize = configuredLinesCount * stacksVisible
-
-  const blockStackTexts = useMemo(
-    () =>
-      Array.from({ length: configuredBlockSize }, (_, index) => {
-        const stack = stacks[configuredBlock.blockStart + index]
-        return stack ? stack.words.join(' ') : ''
-      }).filter(Boolean),
-    [configuredBlock.blockStart, configuredBlockSize, stacks]
-  )
-
-  const layoutMeasureWidth = useMemo(() => createMeasureWidth(), [fontReadyRevision])
-
-  const readerLayout = useMemo<SolveReaderLayoutResult>(() => {
-    const fallback = {
-      width: 0,
-      height: 0,
-      effectiveFontSize: liveSettings.font_size,
-      effectiveStackGap: liveSettings.stack_gap,
-      effectiveRowGap: liveSettings.lines_row_gap,
-      effectiveLinesCount: configuredLinesCount,
-      clampedVerticalOffset: liveSettings.stack_vertical_offset,
-      clampedHorizontalOffset: liveSettings.stack_horizontal_offset,
-      stacksVisible,
-      wordsPerStack: liveSettings.words_per_stack,
-      degradation: {
-        stage: 'stage-1' as const,
-        axis: 'none' as const,
-        comfortFontSize: READER_MIN_VISIBLE_FONT_SIZE,
-      },
-    }
-
-    if (stageDims.width <= 0 || stageDims.height <= 0) return fallback
-
-    return solveReaderLayout({
-      stageWidth: stageDims.width,
-      stageHeight: stageDims.height,
-      stackTexts: blockStackTexts,
-      stacksVisible,
-      wordsPerStack: liveSettings.words_per_stack,
-      fontSize: liveSettings.font_size,
-      linesCount: configuredLinesCount,
-      stackGap: liveSettings.stack_gap,
-      rowGap: liveSettings.lines_row_gap,
-      stackVerticalOffset: liveSettings.stack_vertical_offset,
-      stackHorizontalOffset: liveSettings.stack_horizontal_offset,
-      fontFamily: liveSettings.font_family,
-      fontWeight: 700,
-      measureWidth: layoutMeasureWidth,
-    })
-  }, [
-    blockStackTexts,
-    configuredLinesCount,
-    layoutMeasureWidth,
+  // Every geometric decision for the stage lives in the reader frame module; this
+  // component only supplies the configuration and paints what comes back.
+  const frameConfig = useMemo<ReaderFrameConfig>(() => ({
+    stacksVisible: liveSettings.stacks_visible,
+    wordsPerStack: liveSettings.words_per_stack,
+    linesCount: getEffectiveLinesCount(liveSettings),
+    linesAnchor: resolvedLinesAnchor(liveSettings),
+    fontSize: liveSettings.font_size,
+    stackGap: liveSettings.stack_gap,
+    rowGap: liveSettings.lines_row_gap,
+    stackVerticalOffset: liveSettings.stack_vertical_offset,
+    stackHorizontalOffset: liveSettings.stack_horizontal_offset,
+    fontFamily: liveSettings.font_family,
+    fontWeight: 700,
+    highlightActive: liveSettings.highlight_active,
+    highlightMode: liveSettings.highlight_mode ?? 'default',
+    highlightPanningChunkSize: liveSettings.highlight_panning_chunk_size ?? 0,
+    // view_style + show_chunk_dividers are de-UI'd and no longer honoured
+    // (ADR-0019 §4): always paint as 'default' with dividers off, so a stored
+    // value can't strand a reader in a mode with no off switch. The frame and
+    // StackGrid render paths stay capable but dormant.
+    focalPointsView: false,
+    showChunkDividers: false,
+  }), [
     liveSettings.font_family,
     liveSettings.font_size,
+    liveSettings.highlight_active,
+    liveSettings.highlight_mode,
+    liveSettings.highlight_panning_chunk_size,
+    liveSettings.lines_anchor,
+    liveSettings.lines_count,
     liveSettings.lines_row_gap,
     liveSettings.stack_gap,
     liveSettings.stack_horizontal_offset,
     liveSettings.stack_vertical_offset,
+    liveSettings.stacks_visible,
     liveSettings.words_per_stack,
-    stacksVisible,
-    stageDims.height,
-    stageDims.width,
   ])
 
-  const effectiveLinesCount = readerLayout.effectiveLinesCount
-  const { blockStart, currentLineIdx, currentSlotIdx, lineKey } = deriveBlockPosition(currentIndex, stacksVisible, effectiveLinesCount)
-
-  let revealUpToSlot = panningBarRevealUpToSlot(currentSlotIdx, stacksVisible, liveSettings.highlight_mode, liveSettings.highlight_panning_chunk_size)
-
-  // Prevent content from vanishing when the highlight mode changes mid-row (e.g. panning → default).
-  // Once a slot is revealed in the current row, keep it visible until the row resets.
-  const nextReveal = nextRevealState(revealStateRef.current, lineKey, revealUpToSlot)
-  revealStateRef.current = nextReveal
-  revealUpToSlot = nextReveal.revealUpTo
-
-  const displayRows = buildDisplayRows(stacks, blockStart, currentLineIdx, stacksVisible, revealUpToSlot)
-
-  const isSlotHighlighted = computeHighlightedSlots(
-    liveSettings.highlight_mode ?? 'default',
-    currentLineIdx,
-    currentSlotIdx,
-    stacksVisible,
-    { chunkSize: liveSettings.highlight_panning_chunk_size ?? 0 },
-  )
-
-  const gridTemplateColumns = buildGridTemplateColumns(stacksVisible, readerLayout.effectiveStackGap)
+  const frame = useReaderFrame({
+    stacks,
+    currentIndex,
+    config: frameConfig,
+    stage: stageDims,
+  })
 
   // Match the transition duration to the current beat interval so the bar advances exactly
   // one step per beat and interruptions never cause the ease-restart stutter.
   const progressTransitionMs = Math.max(50, Math.min(300, Math.round(60_000 / liveSettings.bpm)))
 
-  const totalWords = stacks.reduce((s, st) => s + st.words.length, 0)
-  const wordsRead = wordOffsetAtIndex(stacks, currentIndex)
-  const sessionDialogVariant = sessionEndEnabled && sessionEnd
-    ? sessionEnd.reason
-    : null
+  const { totalWords, wordsRead } = session
   const minutesLeft = computeMinutesLeft(totalWords, wordsRead, wpm)
-  const goalBookmarkIndex = useMemo(
-    () =>
-      goalBookmark && stacks.length > 0
-        ? resolveWordsToStackIndex(goalBookmark.wordOffset, stacks)
-        : null,
-    [goalBookmark, stacks]
-  )
   const normalBookmarkMarkers = useMemo(
     () =>
-      bookmarks
+      bookmarks.bookmarks
         .filter((bookmark) => bookmark.kind === 'normal')
         .map((bookmark) => ({
           id: bookmark.id,
           label: bookmark.label,
-          stackIndex: resolveWordsToStackIndex(bookmark.wordOffset, stacks),
+          stackIndex: stackIndex.stackAtOffset(bookmark.wordOffset),
         })),
-    [bookmarks, stacks]
+    [bookmarks.bookmarks, stackIndex]
   )
 
   const useTextConsole = pagedPlainActive
   const readerLayoutAdvisory = useMemo(
     () => ({
-      degradation: readerLayout.degradation,
-      effectiveFontSize: readerLayout.effectiveFontSize,
+      degradation: frame.geometry.degradation,
+      effectiveFontSize: frame.geometry.fontSize,
     }),
-    [readerLayout.degradation, readerLayout.effectiveFontSize]
+    [frame.geometry.degradation, frame.geometry.fontSize]
   )
 
-  const handleTextLocate = useCallback(() => {
-    textPaging.locate()
-    setTextLocateRevision((revision) => revision + 1)
-  }, [textPaging])
-
   const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
-    handleManualSeekTo(Number(e.target.value))
+    session.seekTo(Number(e.target.value))
   }
 
   // ── Quick-settings panel logic ─────────────────────────────────────────────
 
   // Update liveSettings + persist; used by all controls except the WPS slider drag
   const handleQuickSet = useCallback((patch: Partial<Settings>) => {
+    // A reader setting changing is setup activity (ADR-0035 §2) — it exempts
+    // the current counted-pause span, same as a surface opening.
+    noteSetupActivity()
     setLiveSettings((prev) => ({ ...prev, ...patch }))
     onSettingsChange?.(patch)
-  }, [onSettingsChange])
+  }, [onSettingsChange, noteSetupActivity])
 
   // Apply a patch to the live settings shadow only — no persistence (slider drag preview).
   const handleLiveSet = useCallback((patch: Partial<Settings>) => {
+    noteSetupActivity()
     setLiveSettings((prev) => ({ ...prev, ...patch }))
-  }, [])
+  }, [noteSetupActivity])
 
   // Persist a patch only — no live update (slider release commit).
   const handlePersist = useCallback((patch: Partial<Settings>) => {
+    noteSetupActivity()
     onSettingsChange?.(patch)
-  }, [onSettingsChange])
+  }, [onSettingsChange, noteSetupActivity])
 
   const handleDrawerSet = useCallback((patch: Partial<Settings>) => {
     if (
       patch.words_per_stack !== undefined &&
       patch.words_per_stack !== liveSettings.words_per_stack
     ) {
-      handleBeforeRetokenize()
+      session.beforeRetokenize()
     }
     handleQuickSet(patch)
-  }, [handleBeforeRetokenize, handleQuickSet, liveSettings.words_per_stack])
+  }, [session, handleQuickSet, liveSettings.words_per_stack])
 
   const resolvedHighlightTextColor = resolveHighlightTextColor(
     liveSettings.highlight_color,
@@ -734,9 +550,11 @@ export default function Reader({
     }),
   } as React.CSSProperties
 
+  const popoverOpen = surfaces.quickSettingsOpen || surfaces.bookmarksOpen
+
   return (
     <div
-      className={`reader-shell${isFullscreen ? ' reader-shell--fullscreen' : ''}${isFullscreen && showFsControls ? ' reader-shell--fs-controls' : ''}${isFullscreen && (showQuickSettings || showBookmarkPopover) ? ' reader-shell--fs-popover' : ''}`}
+      className={`reader-shell${isFullscreen ? ' reader-shell--fullscreen' : ''}${isFullscreen && showFsControls ? ' reader-shell--fs-controls' : ''}${isFullscreen && popoverOpen ? ' reader-shell--fs-popover' : ''}`}
       style={readerStyle}
     >
       {/* Top bar */}
@@ -745,11 +563,11 @@ export default function Reader({
         tapToRead={liveSettings.tap_to_read}
         wpm={wpm}
         minutesLeft={minutesLeft}
-        showPlainText={showPlainText}
+        showPlainText={surfaces.textViewOpen}
         isFullscreen={isFullscreen}
         backLabel={backLabel}
         onBack={handleBack}
-        onTogglePlainText={() => setShowPlainText((v) => !v)}
+        onTogglePlainText={surfaces.toggleTextView}
         onToggleFullscreen={toggleFullscreen}
       />
 
@@ -760,46 +578,45 @@ export default function Reader({
         progress={progress}
         transitionMs={progressTransitionMs}
         rereReadEndIndex={rereReadEndIndex}
-        goalBookmarkIndex={goalBookmarkIndex}
+        goalBookmarkIndex={session.goalStackIndex}
         normalBookmarkMarkers={normalBookmarkMarkers}
         onSeek={handleSeek}
       />
 
       {/* Text view / RSVP stage — mutually exclusive */}
-      <div className={`reader-main${readerConfigDrawerOpen ? ' reader-main--drawer-open' : ''}`}>
+      <div className={`reader-main${surfaces.configDrawerOpen ? ' reader-main--drawer-open' : ''}`}>
         <div
           className="reader-stage-slot"
-          style={sessionDialogVariant ? { position: 'relative' } : undefined}
+          style={sessionEnd ? { position: 'relative' } : undefined}
         >
-          {browsing ? (
+          {surfaces.stage === 'browse' ? (
             <ReaderLibraryBrowse />
-          ) : showPlainText ? (
+          ) : surfaces.stage === 'text-view' ? (
             <TextViewPanel
               text={text}
               displayContent={displayContent}
               plainTextCtx={plainTextCtx}
               paging={textPaging}
-              textViewMode={textViewMode}
-              onTextViewModeChange={setTextViewMode}
-              locateRevision={textLocateRevision}
-              showPlainText={showPlainText}
-              goalPickArmed={goalPickArmed}
-              onGoalWordPick={handleGoalWordPick}
+              textViewMode={surfaces.textViewMode}
+              onTextViewModeChange={surfaces.setTextViewMode}
+              showPlainText={surfaces.textViewOpen}
+              goalPickArmed={surfaces.goalPickArmed}
+              onGoalWordPick={surfaces.pickGoalWord}
               plainTextContentRef={plainTextContentRef}
-              bookmarks={bookmarks}
+              bookmarks={bookmarks.bookmarks}
             />
           ) : (
             /* Main display */
             <div
               className={[
                 'reader-stage',
-                liveSettings.tap_to_read && state === 'playing' ? 'reader-stage--tap' : '',
+                liveSettings.tap_to_read && playState === 'playing' ? 'reader-stage--tap' : '',
                 tapHoverSide === 'left' ? 'reader-stage--tap-hover-left' : '',
                 tapHoverSide === 'right' ? 'reader-stage--tap-hover-right' : '',
               ]
                 .filter(Boolean)
                 .join(' ')}
-              ref={setReaderStageRef}
+              ref={setStageNode}
               aria-live="polite"
               aria-atomic="true"
               onMouseDown={handleStageMouseDown}
@@ -808,43 +625,27 @@ export default function Reader({
             >
               {countdown !== null ? (
                 <ReaderCountdown countdown={countdown} color={countdownColor} />
-              ) : state === 'idle' || state === 'stopped' ? (
+              ) : playState === 'idle' || playState === 'stopped' ? (
                 <ReaderIdle
-                  playState={state}
+                  playState={playState}
                   logoSrc={logoSrc}
                   tapToRead={liveSettings.tap_to_read}
                   wpm={wpm}
                   totalWords={totalWords}
                   resumePct={resumePct}
                 />
-              ) : displayRows.length > 0 ? (
-                <StackGrid
-                  displayRows={displayRows}
-                  gridTemplateColumns={gridTemplateColumns}
-                  blockStart={blockStart}
-                  stacksVisible={stacksVisible}
-                  highlightActive={liveSettings.highlight_active}
-                  // view_style + show_chunk_dividers are de-UI'd and no longer honoured
-                  // (ADR-0019 §4): always render as 'default' with dividers off, so a
-                  // stored value can't strand a reader in a mode with no off switch. The
-                  // StackGrid/stackLayout render paths stay capable but dormant.
-                  focalPointsView={false}
-                  showChunkDividers={false}
-                  isSlotHighlighted={isSlotHighlighted}
-                  fontSize={readerLayout.effectiveFontSize}
-                  verticalOffset={readerLayout.clampedVerticalOffset}
-                  horizontalOffset={readerLayout.clampedHorizontalOffset}
-                  rowGap={readerLayout.effectiveRowGap}
-                />
+              ) : frame.rows.length > 0 ? (
+                <StackGrid frame={frame} />
               ) : null}
             </div>
           )}
-          {sessionDialogVariant && (
+          {sessionEnd && (
             <SessionDialog
-              variant={sessionDialogVariant}
+              variant={sessionEnd}
               progressPercent={progress * 100}
               wordsRead={wordsRead}
               totalWords={totalWords}
+              sessionStats={sessionStats}
               onSaveExit={handleSessionDialogSaveExit}
               onExitWithoutSaving={handleSessionDialogExitWithoutSaving}
               onAbort={handleSessionDialogDismiss}
@@ -855,36 +656,36 @@ export default function Reader({
           )}
         </div>
         <ReaderConfigDrawer
-          open={readerConfigDrawerOpen}
+          open={surfaces.configDrawerOpen}
           value={liveSettings}
           onChange={handleDrawerSet}
-          onClose={() => setReaderConfigDrawerOpen(false)}
+          onClose={() => surfaces.openConfigDrawer(false)}
           layoutAdvisory={readerLayoutAdvisory}
         />
       </div>
 
       {/* Controls */}
       <ReaderControls
-        playState={state}
+        playState={playState}
         currentIndex={currentIndex}
         stacksLength={stacks.length}
         hasSavedIndex={validSavedIndex !== null}
         resumePct={resumePct}
         countdownActive={countdown !== null}
-        onRestart={() => { handleRestart(); restart() }}
-        onRewind={() => rewind(10)}
-        onPause={pause}
-        onResume={resume}
-        onResumeSaved={handleResume}
-        onPlay={handlePlay}
-        onSkipForward={() => handleManualSeekTo(Math.min(stacks.length - 1, currentIndex + 10))}
-        onStop={stopReading}
+        onRestart={session.restart}
+        onRewind={() => session.rewind(10)}
+        onPause={session.pause}
+        onResume={session.resume}
+        onResumeSaved={session.resumeSaved}
+        onPlay={session.play}
+        onSkipForward={() => session.seekTo(Math.min(stacks.length - 1, currentIndex + 10))}
+        onStop={session.stop}
         leftSlot={isFullscreen ? (
           <span className="reader-meta reader-controls-meta">
             {liveSettings.tap_to_read ? 'Tap mode' : `${wpm} wpm · ${minutesLeft} min left`}
           </span>
         ) : libraryBrowseEnabled ? (
-          <ReaderBrowseToggle browsing={browsing} onToggleBrowse={toggleBrowse} />
+          <ReaderBrowseToggle browsing={surfaces.browsing} onToggleBrowse={surfaces.toggleBrowse} />
         ) : undefined}
         transport={useTextConsole ? (
           <div className="plain-text-console-transport">
@@ -898,39 +699,37 @@ export default function Reader({
             />
             <TextConsoleLocateButton
               detached={textPaging.detached}
-              onLocate={handleTextLocate}
+              onLocate={textPaging.locate}
             />
           </div>
         ) : undefined}
         utilities={
           <>
             <BookmarkPopover
-              open={showBookmarkPopover}
-              onOpenChange={handleBookmarkOpenChange}
+              open={surfaces.bookmarksOpen}
+              onOpenChange={surfaces.openBookmarks}
               text={text}
               currentIndex={currentIndex}
-              stacks={stacks}
-              goalPickDraft={goalPickDraft}
-              goalPickArmed={goalPickArmed}
+              wordIndex={wordIndex}
+              collection={bookmarks}
+              goalPickDraft={surfaces.goalPickDraft}
+              goalPickArmed={surfaces.goalPickArmed}
               plainTextContentRef={plainTextContentRef}
-              onArmGoalPick={handleArmGoalPick}
-              onCancelGoalPick={handleCancelGoalPick}
-              onSeek={handleManualSeekTo}
-              onBookmarksChange={setBookmarks}
-              onGoalBookmarkChange={setGoalBookmark}
-              consumedBookmarkId={consumedGoalBookmarkId}
-              hidden={browsing}
+              onArmGoalPick={surfaces.armGoalPick}
+              onCancelGoalPick={surfaces.leaveGoalPick}
+              onSeek={session.seekTo}
+              hidden={surfaces.browsing}
             />
             <QuickSettingsPopover
               embedded
-              open={showQuickSettings}
-              onOpenChange={handleQuickSettingsOpenChange}
+              open={surfaces.quickSettingsOpen}
+              onOpenChange={surfaces.openQuickSettings}
               liveSettings={liveSettings}
               onQuickSet={handleQuickSet}
               onLiveSet={handleLiveSet}
               onPersist={handlePersist}
-              onBeforeRetokenize={handleBeforeRetokenize}
-              onSeeMoreSettings={() => setReaderConfigDrawerOpen(true)}
+              onBeforeRetokenize={session.beforeRetokenize}
+              onSeeMoreSettings={() => surfaces.openConfigDrawer(true)}
             />
           </>
         }
@@ -942,7 +741,7 @@ export default function Reader({
         tapToReadKey={liveSettings.tap_to_read_key}
         liveRewindKey={liveSettings.live_rewind_key}
         hasSavedIndex={validSavedIndex !== null}
-        playState={state}
+        playState={playState}
       />
     </div>
   )

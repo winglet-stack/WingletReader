@@ -26,10 +26,15 @@ export default function TemporaryReaderApp() {
       .finally(() => setLoading(false))
   }, [])
 
-  const finish = useCallback((reason: string) => {
+  // The overlay session ends the same way whether playback completed or the
+  // reader was closed, and main never read the old `reason` argument, so the
+  // channel takes none. The guard — finish at most once per mount, so a
+  // StrictMode effect replay cannot close a live session — is the part that
+  // ever mattered here.
+  const finish = useCallback(() => {
     if (finishingRef.current) return
     finishingRef.current = true
-    window.api.readWhileWorking.finishTemporarySession(reason).catch(() => {})
+    window.api.readWhileWorking.finishTemporarySession().catch(() => {})
   }, [])
 
   if (loading) {
@@ -55,14 +60,14 @@ export default function TemporaryReaderApp() {
       <SettingsProvider initialSettings={sessionSettings}>
         <LibraryProvider initialActiveText={sessionText}>
           <ReaderProvider
-            onReadingComplete={() => finish('completed')}
+            onReadingComplete={finish}
             initialResumeFrom={0}
           >
             <Reader
-              onBack={() => finish('cancelled')}
-              onExitToLibrary={() => finish('completed')}
+              onBack={finish}
+              onExitToLibrary={finish}
               backLabel="Close"
-              sessionEndEnabled={false}
+              completion="host-completion"
               libraryBrowseEnabled={false}
             />
           </ReaderProvider>

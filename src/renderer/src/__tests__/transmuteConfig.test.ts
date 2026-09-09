@@ -35,8 +35,7 @@ const BASE_SETTINGS: Settings = {
   stack_horizontal_offset: 0,
   theme: 'dark',
   highlight_active: true,
-  lines_enabled: false,
-  lines_count: 3,
+  lines_count: 1,
   lines_row_gap: 8,
   segmentation_enabled: true,
   segmentation_threshold: 5000,
@@ -158,6 +157,31 @@ describe('loadStoredTransmuteConfig — default-filling', () => {
     expect(result.contentLimitType).toBe(defaults.contentLimitType)
   })
 
+  it('preserves the rendered row count of a pre-LB-5 stored blob', () => {
+    const oldDisabledBlob = {
+      ...makeDefaultTransmuteConfig(BASE_SETTINGS),
+      linesEnabled: false,
+      linesCount: 4,
+    }
+    store.data.set(TRANSMUTE_CONFIG_STORAGE_KEY, JSON.stringify(oldDisabledBlob))
+
+    const migrated = loadStoredTransmuteConfig(BASE_SETTINGS)
+
+    expect(migrated.linesCount).toBe(1)
+    expect('linesEnabled' in migrated).toBe(false)
+  })
+
+  it('preserves an enabled line count from a pre-LB-5 stored blob', () => {
+    const oldEnabledBlob = {
+      ...makeDefaultTransmuteConfig(BASE_SETTINGS),
+      linesEnabled: true,
+      linesCount: 4,
+    }
+    store.data.set(TRANSMUTE_CONFIG_STORAGE_KEY, JSON.stringify(oldEnabledBlob))
+
+    expect(loadStoredTransmuteConfig(BASE_SETTINGS).linesCount).toBe(4)
+  })
+
   it('clamps bpm to allowed range', () => {
     store.data.set(TRANSMUTE_CONFIG_STORAGE_KEY, JSON.stringify({ bpm: 99999 }))
     const result = loadStoredTransmuteConfig(BASE_SETTINGS)
@@ -168,5 +192,19 @@ describe('loadStoredTransmuteConfig — default-filling', () => {
     store.data.set(TRANSMUTE_CONFIG_STORAGE_KEY, 'not-json{{{')
     const result = loadStoredTransmuteConfig(BASE_SETTINGS)
     expect(result).toEqual(makeDefaultTransmuteConfig(BASE_SETTINGS))
+  })
+})
+
+describe('persistTransmuteConfig LB-5 shape', () => {
+  it('does not rewrite a legacy linesEnabled field', () => {
+    const legacyRuntimeConfig = {
+      ...makeDefaultTransmuteConfig(BASE_SETTINGS),
+      linesEnabled: false,
+      linesCount: 1,
+    }
+
+    persistTransmuteConfig(legacyRuntimeConfig)
+
+    expect(JSON.parse(store.data.get(TRANSMUTE_CONFIG_STORAGE_KEY)!)).not.toHaveProperty('linesEnabled')
   })
 })

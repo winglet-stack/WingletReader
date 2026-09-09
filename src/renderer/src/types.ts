@@ -11,9 +11,6 @@ export type {
   HighlightMode,
   HighlightingMode,
   ReaderPalette,
-  TextSizePreset,
-  FontPreset,
-  PlaybackPreset,
   ReaderConfig,
   TransmutePreset
 } from '../../shared/settings'
@@ -27,11 +24,17 @@ export type {
   SegmentSourceType,
   TextSegment,
   Summary,
+  // fallow-ignore-next-line unused-type
   SummaryQuestion,
   ReadingPosition,
   ResumeCandidate,
+  // fallow-ignore-next-line unused-type
   BookResumeTarget,
   ReadWhileWorkingStatus,
+  DayStatsRecord,
+  SessionStatsRecord,
+  StatsHighscores,
+  StatsOverview,
   TemporaryReaderSession,
 } from '../../shared/domainRecords'
 
@@ -47,7 +50,9 @@ export interface WordStack {
   type: StackType
 }
 
-export type AppView = 'hub' | 'library' | 'import' | 'make-video' | 'reader' | 'settings' | 'primer' | 'trailer' | 'summaries' | 'add-chapter' | 'showcase' | 'mode-choice' | 'transmute'
+// `AppView` moved to `appShell/routeTable.tsx`, where the destinations are
+// declared: the union is derived from the route table's keys so a destination
+// cannot exist as a token without an entry that says what renders it.
 
 export interface TransmuteConfig {
   textId: number | null
@@ -73,7 +78,6 @@ export interface TransmuteConfig {
   highlightMode: HighlightMode
   highlightPanningChunkSize: number
   highlightingMode: HighlightingMode
-  linesEnabled: boolean
   linesCount: number
   linesRowGap: number
   /** Stacks shown per row in multi-line mode. */

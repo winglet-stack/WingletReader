@@ -1,24 +1,12 @@
 import { useEffect, useState } from 'react'
-import type { AppView } from '../types'
-import { isAlphaDeadRoute, resolveAlphaView } from '../alphaChrome'
 
-export function useAppShellDocumentEffects(
-  view: AppView,
-  setView: (view: AppView) => void,
-  theme: string
-) {
+export function useAppShellDocumentEffects(theme: string) {
   const [fullscreenActive, setFullscreenActive] = useState(false)
   const [appVersion, setAppVersion] = useState<string | null>(null)
 
   useEffect(() => {
     document.body.dataset.theme = theme
   }, [theme])
-
-  useEffect(() => {
-    if (isAlphaDeadRoute(view)) {
-      setView(resolveAlphaView(view))
-    }
-  }, [view, setView])
 
   useEffect(() => {
     let cancelled = false

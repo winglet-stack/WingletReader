@@ -1,4 +1,6 @@
 import React, { useState } from 'react'
+import AlphaNotice from '../AlphaNotice'
+import { alphaChrome } from '../../alphaChrome'
 
 // Result shape mirrors the slice-06 provisioning IPC (typed in env.d.ts). We
 // derive it from the bridge so the renderer never drifts from the main contract.
@@ -48,6 +50,14 @@ export default function PortableDriveSection() {
         Copy WingletReader and your current library onto a USB stick or folder so you can
         read from it on another Windows PC without installing anything.
       </p>
+
+      <AlphaNotice
+        enabled={alphaChrome.portableExperimentalBannerEnabled}
+        label="Portable drive experimental warning"
+        style={{ marginBottom: '1rem' }}
+      >
+        {alphaChrome.portableExperimentalBannerCopy}
+      </AlphaNotice>
 
       <button className="btn-secondary" onClick={run} disabled={phase === 'working'}>
         {phase === 'working' ? 'Creating portable drive…' : '⊠ Create Portable Drive…'}

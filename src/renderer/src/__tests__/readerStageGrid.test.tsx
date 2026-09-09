@@ -47,16 +47,19 @@ vi.stubGlobal('AudioContext', vi.fn(() => ({
 })))
 
 function stubApi() {
+  const saveSettings = vi.fn().mockResolvedValue({})
   vi.stubGlobal('api', {
     db: {
       getTexts: vi.fn().mockResolvedValue([]),
       getSettings: vi.fn().mockResolvedValue({}),
-      saveSettings: vi.fn().mockResolvedValue({}),
+      saveSettings,
       getReadingPosition: vi.fn().mockResolvedValue(null),
       getLatestResumeCandidate: vi.fn().mockResolvedValue(null),
       saveReadingPosition: vi.fn().mockResolvedValue({}),
+      recordSessionStats: vi.fn().mockResolvedValue(undefined),
     },
   })
+  return { saveSettings }
 }
 
 function stageRect(width: number, height: number): DOMRect {
@@ -126,7 +129,6 @@ const BASE_SETTINGS: Settings = {
   stack_horizontal_offset: 0,
   theme: 'dark',
   highlight_active: true,
-  lines_enabled: false,
   lines_count: 1,
   lines_row_gap: 0,
   segmentation_enabled: false,
@@ -163,6 +165,7 @@ const BASE_SETTINGS: Settings = {
 
 // 12 words at words_per_stack=2 → 6 stacks → 2 blocks of 3 visible slots
 const TWELVE_WORDS = 'one two three four five six seven eight nine ten eleven twelve'
+const THIRTY_SIX_WORDS = Array.from({ length: 36 }, (_, index) => `word${index + 1}`).join(' ')
 
 const TEXT: TextRecord = {
   id: 7,
@@ -215,6 +218,43 @@ async function advanceBeats(n: number) {
 }
 
 describe('Reader stage grid — slots and rows', () => {
+  it('renders a missing anchor with the pre-slice centered placement', async () => {
+    vi.useFakeTimers()
+    stubApi()
+    const container = renderReader()
+    await play()
+
+    expect(container.querySelector('.reader-stack-rows--center')).not.toBeNull()
+    expect(container.querySelector('.reader-stack-rows--top')).toBeNull()
+  })
+
+  it('keeps a stored top anchor inert at one line without writing it back', async () => {
+    vi.useFakeTimers()
+    const { saveSettings } = stubApi()
+    const container = renderReader({
+      lines_count: 1,
+      lines_anchor: 'top',
+    })
+    await play()
+
+    expect(container.querySelector('.reader-stack-rows--center')).not.toBeNull()
+    expect(container.querySelector('.reader-stack-rows--top')).toBeNull()
+    expect(saveSettings).not.toHaveBeenCalled()
+  })
+
+  it('restores a stored top anchor when the effective count rises above one', async () => {
+    vi.useFakeTimers()
+    stubApi()
+    const container = renderReaderWithText(
+      { id: 10, title: 'Top anchored', content: THIRTY_SIX_WORDS, word_count: 36 },
+      { lines_count: 3, lines_anchor: 'top' }
+    )
+    await play()
+
+    expect(container.querySelector('.reader-stack-rows--top')).not.toBeNull()
+    expect(container.querySelector('.reader-stack-rows--center')).toBeNull()
+  })
+
   it('renders one row with stacksVisible slots after play; only the first is revealed', async () => {
     vi.useFakeTimers()
     stubApi()
@@ -242,6 +282,32 @@ describe('Reader stage grid — slots and rows', () => {
     expect(slots[2].textContent).toContain('five')
   })
 
+  it('renders the effective line count from the first beat through block reset', async () => {
+    vi.useFakeTimers()
+    stubApi()
+    const container = renderReaderWithText(
+      { id: 10, title: 'Reserved Rows', content: THIRTY_SIX_WORDS, word_count: 36 },
+      { lines_count: 3 }
+    )
+    await play()
+
+    const expectReservedRows = () => {
+      const rows = container.querySelectorAll('.reader-stack-row')
+      expect(rows).toHaveLength(3)
+      rows.forEach((row) => expect((row as HTMLElement).style.minHeight).toBe('90px'))
+    }
+
+    expectReservedRows()
+    expect(container.querySelectorAll('.stack-divider')).toHaveLength(2)
+
+    await advanceBeats(8)
+    expectReservedRows()
+
+    await advanceBeats(1)
+    expectReservedRows()
+    expect(container.querySelectorAll('.stack-divider')).toHaveLength(2)
+  })
+
   it('renders with solver-reduced line count and gaps when the stage is height constrained', async () => {
     vi.useFakeTimers()
     stubApi()
@@ -250,7 +316,6 @@ describe('Reader stage grid — slots and rows', () => {
 
     try {
       const container = renderReader({
-        lines_enabled: true,
         lines_count: 3,
         lines_row_gap: 80,
         stack_gap: 72,
@@ -366,6 +431,47 @@ describe('Reader stage grid — highlight', () => {
     const nowActive = container.querySelectorAll('.stack-slot--active')
     expect(nowActive).toHaveLength(1)
     expect(nowActive[0].textContent).toContain('three')
+  })
+
+  it('pre-reveals and highlights the first scan of a panning chunk above 1', async () => {
+    vi.useFakeTimers()
+    stubApi()
+    const container = renderReader({
+      highlight_mode: 'panning-bar',
+      highlight_panning_chunk_size: 3,
+    })
+    await play()
+
+    // Opening beat of a 3-wide chunk reveals the first ceil(3/2) slots…
+    const slots = container.querySelectorAll('.stack-slot')
+    expect(slots[0].textContent).toContain('one')
+    expect(slots[1].textContent).toContain('three')
+    expect(slots[2].textContent).toBe('')
+
+    // …and highlights exactly those, joined by the connected-highlight classes.
+    const active = container.querySelectorAll('.stack-slot--active')
+    expect(active).toHaveLength(2)
+    expect(container.querySelectorAll('.stack-slot--connected-right')).toHaveLength(1)
+    expect(container.querySelectorAll('.stack-slot--connected-left')).toHaveLength(1)
+  })
+
+  it('keeps a slot revealed after the highlight mode narrows mid-row', async () => {
+    vi.useFakeTimers()
+    stubApi()
+    const container = renderReader({
+      highlight_mode: 'panning-bar',
+      highlight_panning_chunk_size: 3,
+    })
+    await play()
+    expect(container.querySelectorAll('.stack-slot')[1].textContent).toContain('three')
+
+    // Gap beat of the same chunk highlights nothing, but the sticky reveal
+    // high-water mark must keep the already-revealed slot on screen.
+    await advanceBeats(1)
+    const slots = container.querySelectorAll('.stack-slot')
+    expect(slots[0].textContent).toContain('one')
+    expect(slots[1].textContent).toContain('three')
+    expect(container.querySelectorAll('.stack-slot--active')).toHaveLength(0)
   })
 
   it('renders no active slot when highlight_active is off', async () => {

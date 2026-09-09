@@ -11,6 +11,7 @@ import React from 'react'
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
 import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react'
 import PortableDriveSection from '../components/settings/PortableDriveSection'
+import { alphaChrome } from '../alphaChrome'
 
 afterEach(cleanup)
 
@@ -26,6 +27,18 @@ beforeEach(() => {
 })
 
 describe('PortableDriveSection', () => {
+  it('shows the experimental warning above the create-drive action (PRD D6)', () => {
+    render(<PortableDriveSection />)
+
+    const banner = screen.getByRole('status', { name: 'Portable drive experimental warning' })
+    expect(banner.textContent).toBe(alphaChrome.portableExperimentalBannerCopy)
+
+    const createButton = screen.getByRole('button', { name: /create portable drive/i })
+    expect(
+      banner.compareDocumentPosition(createButton) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy()
+  })
+
   it('picks a folder, provisions, and shows the launcher guidance with the target path', async () => {
     selectPortableTarget.mockResolvedValue({ canceled: false, targetPath: 'E:\\Stick' })
     createPortableDrive.mockResolvedValue({

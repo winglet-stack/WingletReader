@@ -10,10 +10,24 @@ interface PlaybackOptions {
   pauseOnNaturalEnd?: boolean
 }
 
-interface PlaybackResult {
+/**
+ * The playback engine: the stack timer, the live index and the transport verbs.
+ *
+ * It is **behind** the reading session (`useReadingSession.ts`), not beside it —
+ * the Reader consumes the session interface and never wires playback to session
+ * lifecycle itself (`architecture-depth/11`). The type is exported so the
+ * session's coordination half can be driven by a fake engine in tests.
+ */
+export interface PlaybackEngine {
   stacks: WordStack[]
   currentIndex: number
   state: PlaybackState
+  /**
+   * The tempo playback is running at — the same `settings.bpm` the beat timer
+   * schedules from, surfaced because the session's stats sensor scales its gap
+   * clamp to the nominal beat (ADR-0036 §3) and reads no settings of its own.
+   */
+  bpm: number
   wpm: number
   progress: number // 0–1
   play: () => void
@@ -35,7 +49,7 @@ export function usePlayback({
   text,
   settings,
   pauseOnNaturalEnd = false,
-}: PlaybackOptions): PlaybackResult {
+}: PlaybackOptions): PlaybackEngine {
   const [stacks, setStacks] = useState<WordStack[]>([])
   const [currentIndex, setCurrentIndex] = useState(0)
   const [state, setState] = useState<PlaybackState>('idle')
@@ -258,6 +272,7 @@ export function usePlayback({
     stacks,
     currentIndex,
     state,
+    bpm: settings.bpm,
     wpm,
     progress,
     play,

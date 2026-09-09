@@ -1,6 +1,8 @@
 import type { WordStack, StackType, Settings } from '../types'
+import { packStacks, type StackPackerUnit } from './stackPacker'
 
 export const MAX_WORDS_PER_STACK = 7
+const READER_MAX_WORDS_PER_STACK = 10
 
 /** A word is "exceedingly long" if it exceeds this character count; end the current chunk early. */
 export const LONG_WORD_CHAR_THRESHOLD = 15
@@ -14,7 +16,7 @@ export interface ChunkRules {
   headlines: boolean
 }
 
-// Default rules preserve all existing chunking behavior.
+// Default rules keep headline detection on while the paragraph packer handles prose.
 const DEFAULT_RULES: ChunkRules = {
   longWord: false,
   enumerations: false,
@@ -74,6 +76,47 @@ interface Token {
   nameGroupId?: number
 }
 
+// A word ends a sentence when it ends in terminal punctuation, possibly followed
+// by closing quotes/brackets.
+const TERMINAL_PUNCT_RE = /[.!?]["'"')]*$/
+// Closing quotes/brackets stripped before the abbreviation lookup.
+const CLOSING_QUOTE_RE = /["'"')]+$/
+// A word begins a new sentence if it opens with a capital or an opening quote
+// (straight or curly, single or double) or an opening parenthesis.
+const SENTENCE_START_RE = /^[A-Z"'(“‘]/
+
+// Known abbreviations that end in a period without ending a sentence (ADR-0031).
+// Lowercased, closing quotes stripped, before lookup. Curated, no dependency.
+const ABBREVIATIONS = new Set([
+  // titles
+  'mr.', 'mrs.', 'ms.', 'dr.', 'prof.', 'st.', 'sr.', 'jr.',
+  // latinisms
+  'e.g.', 'i.e.', 'etc.', 'vs.', 'cf.', 'al.',
+])
+// A single-letter initial (A., J.) or a dotted acronym (U.S.A.) — never a sentence end.
+const INITIALS_RE = /^([a-z]\.)+$/i
+
+/** Whether a trailing-punctuation word is a known abbreviation rather than a sentence end. */
+function isAbbreviation(word: string): boolean {
+  const bare = word.replace(CLOSING_QUOTE_RE, '').toLowerCase()
+  return ABBREVIATIONS.has(bare) || INITIALS_RE.test(bare)
+}
+
+/**
+ * Hard sentence-end test (ADR-0031). A word ending in terminal punctuation ends a
+ * sentence only if it is (a) not a known abbreviation and (b) followed by a word
+ * that begins a new sentence (capital or opening quote) — the one-token
+ * lowercase-continuation lookahead that kills dialogue-tag false positives
+ * (`"Are you sure?" he asked.`). `nextWord` is undefined at the paragraph end,
+ * where the paragraph boundary already terminates the Stack.
+ */
+function isSentenceEndWord(word: string, nextWord: string | undefined): boolean {
+  if (!TERMINAL_PUNCT_RE.test(word)) return false
+  if (isAbbreviation(word)) return false
+  if (nextWord === undefined) return false
+  return SENTENCE_START_RE.test(nextWord)
+}
+
 function isHeadline(para: string): boolean {
   const line = para.split('\n')[0].trim()
   if (!line) return false
@@ -105,7 +148,7 @@ function tokenizeParagraph(para: string, isHL: boolean): Token[] {
   for (let i = 0; i < words.length; i++) {
     const w = words[i]
     const isLast = i === words.length - 1
-    const isSentenceEnd = /[.!?]["'"')]*$/.test(w) && !isLast
+    const isSentenceEnd = !isLast && isSentenceEndWord(w, words[i + 1])
 
     tokens.push({
       text: w,
@@ -161,7 +204,11 @@ function nameGroupEnd(tokens: Token[], start: number): number {
   return end
 }
 
-function collectHeadlineStacks(tokens: Token[], start: number): { stacks: WordStack[]; next: number } {
+function collectHeadlineStacks(
+  tokens: Token[],
+  start: number,
+  effectiveWPS: number
+): { stacks: WordStack[]; next: number } {
   const headlineWords: string[] = []
   let i = start
   while (i < tokens.length && tokens[i].isHeadlinePara) {
@@ -171,26 +218,16 @@ function collectHeadlineStacks(tokens: Token[], start: number): { stacks: WordSt
     if (wasParagraphEnd) break
   }
   const stacks: WordStack[] = []
-  for (let j = 0; j < headlineWords.length; j += MAX_WORDS_PER_STACK) {
-    stacks.push({ words: headlineWords.slice(j, j + MAX_WORDS_PER_STACK), type: 'headline' })
+  for (let j = 0; j < headlineWords.length; j += effectiveWPS) {
+    stacks.push({ words: headlineWords.slice(j, j + effectiveWPS), type: 'headline' })
   }
   return { stacks, next: i }
-}
-
-interface StackDraft {
-  words: string[]
-  type: StackType
 }
 
 function terminalStackType(t: Token): StackType | null {
   if (t.isParagraphEnd) return 'paragraph-end'
   if (t.isSentenceEnd) return 'sentence-end'
   return null
-}
-
-function shouldFlushBeforeToken(t: Token, stackWords: string[], rules: ChunkRules): boolean {
-  if (t.isHeadlineFirst && rules.headlines) return true
-  return rules.longWord && stackWords.length > 0 && t.text.length > LONG_WORD_CHAR_THRESHOLD
 }
 
 function isStandaloneMarker(t: Token, rules: ChunkRules): boolean {
@@ -200,94 +237,116 @@ function isStandaloneMarker(t: Token, rules: ChunkRules): boolean {
   )
 }
 
-function appendStandaloneMarker(draft: StackDraft, t: Token): void {
-  draft.words.push(t.text)
-  if (t.isParagraphEnd) draft.type = 'paragraph-end'
+function stackTypeFromLastToken(t: Token): StackType {
+  return terminalStackType(t) ?? 'normal'
 }
 
-function appendToken(draft: StackDraft, t: Token): boolean {
-  draft.words.push(t.text)
-  const terminalType = terminalStackType(t)
-  if (!terminalType) return false
-  draft.type = terminalType
-  return true
+function stackFromTokens(tokens: Token[]): WordStack {
+  return {
+    words: tokens.map((t) => t.text),
+    type: stackTypeFromLastToken(tokens[tokens.length - 1]),
+  }
 }
 
-function appendNameGroup(
-  tokens: Token[],
-  start: number,
-  effectiveWPS: number,
-  draft: StackDraft,
-  rules: ChunkRules
-): { handled: boolean; next: number; complete: boolean; flushFirst: boolean } {
-  const token = tokens[start]
-  if (!rules.names || token.nameGroupId === undefined) {
-    return { handled: false, next: start, complete: false, flushFirst: false }
+interface PackerTokenUnit extends StackPackerUnit {
+  start: number
+  end: number
+}
+
+/**
+ * Whether the packer should *prefer* a break after the unit ending at `unitEnd`.
+ * Sentence ends are hard pre-splits now (ADR-0031, handled in packParagraphTokens),
+ * so only the opt-in `commas` / `long-word` rules fold in here as soft, crossable
+ * candidates (SP-3) *within* a sentence.
+ */
+function preferredBreakAfterUnit(tokens: Token[], unitEnd: number, rules: ChunkRules): boolean {
+  // Comma on: a trailing-comma word invites a break *after* it.
+  if (rules.commas && /,$/.test(tokens[unitEnd - 1].text)) return true
+  // Long-word on: a 15+ char word invites a break *before* it — i.e. after this unit
+  // when the next token begins one. Name-group atomicity still wins: the next token
+  // is always a unit boundary here, so a long word buried inside a group never fires.
+  if (
+    rules.longWord &&
+    unitEnd < tokens.length &&
+    tokens[unitEnd].text.length > LONG_WORD_CHAR_THRESHOLD
+  ) {
+    return true
+  }
+  return false
+}
+
+function packTokenRun(tokens: Token[], effectiveWPS: number, rules: ChunkRules): WordStack[] {
+  if (tokens.length === 0) return []
+
+  const units: PackerTokenUnit[] = []
+  let i = 0
+  while (i < tokens.length) {
+    const groupEnd =
+      rules.names && tokens[i].nameGroupId !== undefined ? nameGroupEnd(tokens, i) : i + 1
+
+    units.push({
+      start: i,
+      end: groupEnd,
+      wordSpan: groupEnd - i,
+      preferredBreakAfter: preferredBreakAfterUnit(tokens, groupEnd, rules),
+    })
+    i = groupEnd
   }
 
-  const groupEnd = nameGroupEnd(tokens, start)
-  const groupSize = groupEnd - start
-  const spaceLeft = effectiveWPS - draft.words.length
-
-  if (groupSize > spaceLeft) {
-    const flushFirst = draft.words.length > 0
-    return { handled: flushFirst, next: start, complete: false, flushFirst }
-  }
-
-  for (let k = start; k < groupEnd; k++) draft.words.push(tokens[k].text)
-  const terminalType = terminalStackType(tokens[groupEnd - 1])
-  if (terminalType) draft.type = terminalType
-  return { handled: true, next: groupEnd, complete: terminalType !== null, flushFirst: false }
+  return packStacks(units, effectiveWPS).map((packed) => {
+    const start = units[packed.startUnit].start
+    const end = units[packed.endUnit - 1].end
+    return stackFromTokens(tokens.slice(start, end))
+  })
 }
 
-function fillNormalStack(
-  tokens: Token[],
-  start: number,
+function pushPackedRun(
+  out: WordStack[],
+  run: Token[],
   effectiveWPS: number,
   rules: ChunkRules
-): { stack: WordStack | null; next: number } {
-  const draft: StackDraft = { words: [], type: 'normal' }
-  let i = start
+): void {
+  if (run.length === 0) return
+  out.push(...packTokenRun(run, effectiveWPS, rules))
+  run.length = 0
+}
 
-  while (draft.words.length < effectiveWPS && i < tokens.length) {
-    const t = tokens[i]
+function packParagraphTokens(
+  tokens: Token[],
+  effectiveWPS: number,
+  rules: ChunkRules
+): WordStack[] {
+  const stacks: WordStack[] = []
+  const run: Token[] = []
 
-    if (shouldFlushBeforeToken(t, draft.words, rules)) break
-
-    if (isStandaloneMarker(t, rules)) {
-      if (draft.words.length > 0) break
-      appendStandaloneMarker(draft, t)
-      i++
-      break
-    }
-
-    const nameGroup = appendNameGroup(tokens, i, effectiveWPS, draft, rules)
-    if (nameGroup.flushFirst) break
-    if (nameGroup.handled) {
-      i = nameGroup.next
-      if (nameGroup.complete) break
+  for (const token of tokens) {
+    if (isStandaloneMarker(token, rules)) {
+      pushPackedRun(stacks, run, effectiveWPS, rules)
+      stacks.push(stackFromTokens([token]))
       continue
     }
 
-    const completedByTerminal = appendToken(draft, t)
-    i++
-    if (completedByTerminal) break
+    // Commas and long words are no longer hard pre-splits (SP-3); they enter the
+    // packer as soft preferred breaks via preferredBreakAfterUnit.
+    run.push(token)
 
-    // Comma rule: end chunk after a word with a trailing comma.
-    if (rules.commas && /,$/.test(t.text)) break
+    // Hard sentence boundary (ADR-0031): a period always ends a Stack. Flush the
+    // accumulated sentence through the packer — like a standalone marker — so the
+    // balanced DP runs per sentence and never spans a period.
+    if (token.isSentenceEnd) {
+      pushPackedRun(stacks, run, effectiveWPS, rules)
+    }
   }
 
-  return {
-    stack: draft.words.length > 0 ? { words: draft.words, type: draft.type } : null,
-    next: i,
-  }
+  pushPackedRun(stacks, run, effectiveWPS, rules)
+  return stacks
 }
 
 export function buildStacks(
   text: string,
   wordsPerStack: number,
   rules: ChunkRules = DEFAULT_RULES,
-  maxWordsPerStack = MAX_WORDS_PER_STACK
+  maxWordsPerStack = READER_MAX_WORDS_PER_STACK
 ): WordStack[] {
   if (!text.trim()) return []
 
@@ -298,30 +357,20 @@ export function buildStacks(
     .map((p) => p.trim())
     .filter((p) => p.length > 0)
 
-  const allTokens: Token[] = []
+  const stacks: WordStack[] = []
+
   for (const para of paragraphs) {
     const hl = isHeadline(para)
-    allTokens.push(...tokenizeParagraph(para, hl))
-  }
+    const tokens = tokenizeParagraph(para, hl)
+    if (rules.names) annotateNameGroups(tokens)
 
-  if (rules.names) annotateNameGroups(allTokens)
-
-  const stacks: WordStack[] = []
-  let i = 0
-
-  while (i < allTokens.length) {
-    const tok = allTokens[i]
-
-    if (tok.isHeadlineFirst && rules.headlines) {
-      const { stacks: headlineStacks, next } = collectHeadlineStacks(allTokens, i)
+    if (tokens[0]?.isHeadlineFirst && rules.headlines) {
+      const { stacks: headlineStacks } = collectHeadlineStacks(tokens, 0, effectiveWPS)
       stacks.push(...headlineStacks)
-      i = next
       continue
     }
 
-    const { stack, next } = fillNormalStack(allTokens, i, effectiveWPS, rules)
-    if (stack) stacks.push(stack)
-    i = next
+    stacks.push(...packParagraphTokens(tokens, effectiveWPS, rules))
   }
 
   return stacks

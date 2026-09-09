@@ -117,7 +117,13 @@ export default function SettingsPanel({
   }
 
   return (
-    <div className={`view-container${activeSettingsSubview ? ' view-container--settings-subview' : ''}`}>
+    <div
+      className={`view-container ${
+        activeSettingsSubview
+          ? 'view-container--settings-subview'
+          : 'view-container--settings-landing'
+      }`}
+    >
       {activeSettingsSubview === null && (
         <SettingsHeader transmuteMode={false} saved={false} />
       )}

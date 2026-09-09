@@ -38,6 +38,10 @@ function allWords(stacks: ReturnType<typeof buildStacks>): string[] {
 
 const LONG_WORD = 'A'.repeat(LONG_WORD_CHAR_THRESHOLD + 1)
 
+it('keeps the legacy exported max words constant for archived tokenizer callers', () => {
+  expect(MAX_WORDS_PER_STACK).toBe(7)
+})
+
 // ── isEnumerationMarker ────────────────────────────────────────────────────
 
 describe('isEnumerationMarker', () => {
@@ -101,12 +105,27 @@ describe('isBulletMarker', () => {
 // ── 1. Long-word early chunk ending ───────────────────────────────────────
 
 describe('chunk rule: longWord', () => {
-  it('ends the current chunk before a very long word', () => {
-    const text = `short words ${LONG_WORD} more`
-    const stacks = buildStacks(text, 5, { ...NO_RULES, longWord: true })
-    expect(stacks[0].words).not.toContain(LONG_WORD)
-    const longChunk = stacks.find((s) => s.words[0] === LONG_WORD)
-    expect(longChunk).toBeDefined()
+  it('prefers a break before a long word when it lands in-band (soft, SP-3)', () => {
+    // 14 words at N=8, long word at index 6. Pure balance gives [7][7] (long word
+    // shares stack 1 with "six"); the soft break before it pulls the split to [6][8].
+    const text = `one two three four five six ${LONG_WORD} eight nine ten eleven twelve thirteen fourteen.`
+    const withRule = buildStacks(text, 8, { ...NO_RULES, longWord: true })
+    const withoutRule = buildStacks(text, 8, { ...NO_RULES, longWord: false })
+
+    const longStackWith = withRule.find((s) => s.words.includes(LONG_WORD))
+    expect(longStackWith?.words[0]).toBe(LONG_WORD)
+
+    const longStackWithout = withoutRule.find((s) => s.words.includes(LONG_WORD))
+    expect(longStackWithout?.words).toContain('six')
+  })
+
+  it('crosses a long word when breaking before it would leave a tiny stack (SP-3)', () => {
+    // 8 words at N=8, long word last: a break before it would strand a 1-word stack,
+    // so the DP crosses the soft break and keeps a single full stack.
+    const text = `alpha beta gamma delta epsilon zeta eta ${LONG_WORD}`
+    const stacks = buildStacks(text, 8, { ...NO_RULES, longWord: true })
+    expect(stacks).toHaveLength(1)
+    expect(stacks[0].words).toHaveLength(8)
   })
 
   it('does not split the long word itself', () => {
@@ -262,16 +281,28 @@ describe('chunk rule: bullets', () => {
 // ── 5. Comma-based chunk endings ───────────────────────────────────────────
 
 describe('chunk rule: commas', () => {
-  it('ends a chunk at a word with trailing comma', () => {
-    const stacks = buildStacks('Hello, world.', 5, { ...NO_RULES, commas: true })
-    expect(stacks[0].words).toEqual(['Hello,'])
-    expect(stacks[1].words).toEqual(['world.'])
+  it('prefers a comma break when it lands in-band (soft, SP-3)', () => {
+    // 14 words at N=8, comma after word 6. Pure balance gives [7][7]; the soft comma
+    // break pulls the split to [6][8], keeping the trailing comma at a stack boundary.
+    const text = 'one two three four five six, seven eight nine ten eleven twelve thirteen fourteen.'
+    const withRule = buildStacks(text, 8, { ...NO_RULES, commas: true })
+    const withoutRule = buildStacks(text, 8, { ...NO_RULES, commas: false })
+
+    expect(withRule.map((s) => s.words.length)).toEqual([6, 8])
+    expect(withRule[0].words[withRule[0].words.length - 1]).toBe('six,')
+    expect(withoutRule.map((s) => s.words.length)).toEqual([7, 7])
   })
 
-  it('keeps the comma attached to the preceding word', () => {
-    const stacks = buildStacks('fast, easy, readable.', 5, { ...NO_RULES, commas: true })
-    expect(stacks[0].words).toContain('fast,')
-    expect(stacks[1].words).toContain('easy,')
+  it('crosses commas that would strand a tiny stack — no [2][1] stutter (SP-3)', () => {
+    // The ADR-0030 worst case: comma-heavy short clause. Hard splitting yields
+    // [He ran,][jumped,][…] stutter; the soft packer keeps a single full stack.
+    const stacks = buildStacks('He ran, jumped, and fell to the floor.', 8, {
+      ...NO_RULES,
+      commas: true,
+    })
+    expect(stacks.map((s) => s.words.length)).toEqual([8])
+    expect(stacks[0].words).toContain('ran,')
+    expect(stacks[0].words).toContain('jumped,')
   })
 
   it('does not produce empty chunks', () => {
@@ -325,7 +356,7 @@ describe('chunk rule: names', () => {
     const text = 'Alpha Beta Gamma Delta Epsilon done.'
     const stacks = buildStacks(text, 2, { ...NO_RULES, names: true })
     stacks.forEach((s) => expect(s.words.length).toBeGreaterThan(0))
-    stacks.forEach((s) => expect(s.words.length).toBeLessThanOrEqual(2))
+    expect(stacks[0].words).toEqual(['Alpha', 'Beta', 'Gamma', 'Delta', 'Epsilon'])
     const all = allWords(stacks)
     expect(all).toContain('Alpha')
     expect(all).toContain('Beta')
@@ -373,13 +404,15 @@ describe('chunk rule: headlines', () => {
     expect(headlineStack).toBeUndefined()
   })
 
-  it('splits long headlines at MAX_WORDS_PER_STACK', () => {
-    // Build a headline with more words than MAX_WORDS_PER_STACK using all-caps
+  it('splits long headlines at words_per_stack', () => {
     const text = 'THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG\n\nbody.'
     const stacks = buildStacks(text, 3, { ...NO_RULES, headlines: true })
     const headlineStacks = stacks.filter((s) => s.type === 'headline')
-    expect(headlineStacks.length).toBeGreaterThan(1)
-    headlineStacks.forEach((s) => expect(s.words.length).toBeLessThanOrEqual(MAX_WORDS_PER_STACK))
+    expect(headlineStacks.map((s) => s.words)).toEqual([
+      ['THE', 'QUICK', 'BROWN'],
+      ['FOX', 'JUMPS', 'OVER'],
+      ['THE', 'LAZY', 'DOG'],
+    ])
   })
 
   it('preserves all headline words across multiple stacks', () => {
@@ -408,6 +441,12 @@ describe('all new rules disabled', () => {
     stacks.forEach((s) => expect(s.words.length).toBeLessThanOrEqual(3))
   })
 
+  it('honors words_per_stack above the retired 7-word cap', () => {
+    const text = 'one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen.'
+    const stacks = buildStacks(text, 8, NO_RULES)
+    expect(stacks.map((s) => s.words.length)).toEqual([8, 8])
+  })
+
   it('preserves original word order', () => {
     const text = 'Alpha beta gamma delta epsilon zeta.'
     const stacks = buildStacks(text, 3, NO_RULES)
@@ -428,16 +467,204 @@ describe('all new rules disabled', () => {
   })
 })
 
+// ── 8b. SP-5 golden: hard sentence boundaries, opt-in rules off ─────────────
+
+describe('SP-5 golden (hard sentence boundaries, opt-in rules off)', () => {
+  const HEADLINES_ONLY: ChunkRules = { ...NO_RULES, headlines: true }
+
+  // Frozen golden for the ADR-0031 hard-boundary behavior: a period always ends a
+  // Stack, so the balanced DP runs per sentence. Every sentence end (that survives
+  // the abbreviation + lowercase-continuation guards) terminates its Stack; no
+  // Stack spans a period. With every opt-in break rule OFF, buildStacks must
+  // reproduce this exactly — the opt-in path is unchanged from SP-3.
+  const CORPUS = [
+    'He nodded. The quick brown fox jumped over every lazy dog nearby today.',
+    'INTRODUCTION\n\nSome body text here, with a comma, and a supercalifragilisticexpialidocious word.',
+    'One two three four five six. Seven eight nine ten eleven twelve thirteen fourteen fifteen.',
+    'John Smith arrived, quickly. Then Mary Jane Watson left the building forever.\n\n- A bullet point here.',
+    'Short. Tiny sentences here. A medium length sentence follows this one right now for balance.',
+  ]
+
+  const GOLDEN: Record<string, [string, string[]][][]> = {
+    'N4-no': [
+      [['sentence-end', ['He', 'nodded.']], ['normal', ['The', 'quick', 'brown', 'fox']], ['normal', ['jumped', 'over', 'every', 'lazy']], ['paragraph-end', ['dog', 'nearby', 'today.']]],
+      [['paragraph-end', ['INTRODUCTION']], ['normal', ['Some', 'body', 'text', 'here,']], ['normal', ['with', 'a', 'comma,', 'and']], ['paragraph-end', ['a', 'supercalifragilisticexpialidocious', 'word.']]],
+      [['normal', ['One', 'two', 'three']], ['sentence-end', ['four', 'five', 'six.']], ['normal', ['Seven', 'eight', 'nine']], ['normal', ['ten', 'eleven', 'twelve']], ['paragraph-end', ['thirteen', 'fourteen', 'fifteen.']]],
+      [['sentence-end', ['John', 'Smith', 'arrived,', 'quickly.']], ['normal', ['Then', 'Mary', 'Jane', 'Watson']], ['paragraph-end', ['left', 'the', 'building', 'forever.']], ['normal', ['-', 'A', 'bullet']], ['paragraph-end', ['point', 'here.']]],
+      [['sentence-end', ['Short.']], ['sentence-end', ['Tiny', 'sentences', 'here.']], ['normal', ['A', 'medium', 'length', 'sentence']], ['normal', ['follows', 'this', 'one', 'right']], ['paragraph-end', ['now', 'for', 'balance.']]],
+    ],
+    'N4-hl': [
+      [['sentence-end', ['He', 'nodded.']], ['normal', ['The', 'quick', 'brown', 'fox']], ['normal', ['jumped', 'over', 'every', 'lazy']], ['paragraph-end', ['dog', 'nearby', 'today.']]],
+      [['headline', ['INTRODUCTION']], ['normal', ['Some', 'body', 'text', 'here,']], ['normal', ['with', 'a', 'comma,', 'and']], ['paragraph-end', ['a', 'supercalifragilisticexpialidocious', 'word.']]],
+      [['normal', ['One', 'two', 'three']], ['sentence-end', ['four', 'five', 'six.']], ['normal', ['Seven', 'eight', 'nine']], ['normal', ['ten', 'eleven', 'twelve']], ['paragraph-end', ['thirteen', 'fourteen', 'fifteen.']]],
+      [['sentence-end', ['John', 'Smith', 'arrived,', 'quickly.']], ['normal', ['Then', 'Mary', 'Jane', 'Watson']], ['paragraph-end', ['left', 'the', 'building', 'forever.']], ['normal', ['-', 'A', 'bullet']], ['paragraph-end', ['point', 'here.']]],
+      [['sentence-end', ['Short.']], ['sentence-end', ['Tiny', 'sentences', 'here.']], ['normal', ['A', 'medium', 'length', 'sentence']], ['normal', ['follows', 'this', 'one', 'right']], ['paragraph-end', ['now', 'for', 'balance.']]],
+    ],
+    'N8-no': [
+      [['sentence-end', ['He', 'nodded.']], ['normal', ['The', 'quick', 'brown', 'fox', 'jumped', 'over']], ['paragraph-end', ['every', 'lazy', 'dog', 'nearby', 'today.']]],
+      [['paragraph-end', ['INTRODUCTION']], ['normal', ['Some', 'body', 'text', 'here,', 'with', 'a']], ['paragraph-end', ['comma,', 'and', 'a', 'supercalifragilisticexpialidocious', 'word.']]],
+      [['sentence-end', ['One', 'two', 'three', 'four', 'five', 'six.']], ['normal', ['Seven', 'eight', 'nine', 'ten', 'eleven']], ['paragraph-end', ['twelve', 'thirteen', 'fourteen', 'fifteen.']]],
+      [['sentence-end', ['John', 'Smith', 'arrived,', 'quickly.']], ['paragraph-end', ['Then', 'Mary', 'Jane', 'Watson', 'left', 'the', 'building', 'forever.']], ['paragraph-end', ['-', 'A', 'bullet', 'point', 'here.']]],
+      [['sentence-end', ['Short.']], ['sentence-end', ['Tiny', 'sentences', 'here.']], ['normal', ['A', 'medium', 'length', 'sentence', 'follows', 'this']], ['paragraph-end', ['one', 'right', 'now', 'for', 'balance.']]],
+    ],
+    'N8-hl': [
+      [['sentence-end', ['He', 'nodded.']], ['normal', ['The', 'quick', 'brown', 'fox', 'jumped', 'over']], ['paragraph-end', ['every', 'lazy', 'dog', 'nearby', 'today.']]],
+      [['headline', ['INTRODUCTION']], ['normal', ['Some', 'body', 'text', 'here,', 'with', 'a']], ['paragraph-end', ['comma,', 'and', 'a', 'supercalifragilisticexpialidocious', 'word.']]],
+      [['sentence-end', ['One', 'two', 'three', 'four', 'five', 'six.']], ['normal', ['Seven', 'eight', 'nine', 'ten', 'eleven']], ['paragraph-end', ['twelve', 'thirteen', 'fourteen', 'fifteen.']]],
+      [['sentence-end', ['John', 'Smith', 'arrived,', 'quickly.']], ['paragraph-end', ['Then', 'Mary', 'Jane', 'Watson', 'left', 'the', 'building', 'forever.']], ['paragraph-end', ['-', 'A', 'bullet', 'point', 'here.']]],
+      [['sentence-end', ['Short.']], ['sentence-end', ['Tiny', 'sentences', 'here.']], ['normal', ['A', 'medium', 'length', 'sentence', 'follows', 'this']], ['paragraph-end', ['one', 'right', 'now', 'for', 'balance.']]],
+    ],
+  }
+
+  for (const N of [4, 8]) {
+    for (const [label, rules] of [['no', NO_RULES], ['hl', HEADLINES_ONLY]] as const) {
+      it(`matches SP-2b golden at N=${N} (${label})`, () => {
+        const actual = CORPUS.map((t) =>
+          buildStacks(t, N, rules).map((s) => [s.type, s.words])
+        )
+        expect(actual).toEqual(GOLDEN[`N${N}-${label}`])
+      })
+    }
+  }
+})
+
 // ── 9. Multiple rules enabled at once ─────────────────────────────────────
+
+describe('elastic stack packing', () => {
+  it('balances an 18-word paragraph at N=8 into three 6-word stacks', () => {
+    const text = [
+      'one',
+      'two',
+      'three',
+      'four',
+      'five',
+      'six',
+      'seven',
+      'eight',
+      'nine',
+      'ten',
+      'eleven',
+      'twelve',
+      'thirteen',
+      'fourteen',
+      'fifteen',
+      'sixteen',
+      'seventeen',
+      'eighteen.',
+    ].join(' ')
+    const stacks = buildStacks(text, 8, NO_RULES)
+
+    expect(stacks.map((s) => s.words.length)).toEqual([6, 6, 6])
+  })
+
+  it('ends a Stack on a hard sentence boundary — short sentences get their own Stack (ADR-0031)', () => {
+    const text = 'He nodded. The quick brown fox jumped over every lazy dog nearby today.'
+    const stacks = buildStacks(text, 8, NO_RULES)
+    const firstStack = stacks[0]
+
+    // "He nodded." is its own one-beat Stack (accepted, not merged into the next sentence).
+    expect(firstStack.words).toEqual(['He', 'nodded.'])
+    expect(firstStack.type).toBe('sentence-end')
+    // No Stack spans the period: "The" starts a fresh sentence run.
+    expect(stacks.every((s) => !(s.words.includes('nodded.') && s.words.includes('The')))).toBe(true)
+  })
+
+  it('keeps paragraphs as hard boundaries', () => {
+    const stacks = buildStacks('one two three four.\n\nfive six seven eight.', 8, NO_RULES)
+
+    expect(stacks).toHaveLength(2)
+    expect(stacks[0].words).toEqual(['one', 'two', 'three', 'four.'])
+    expect(stacks[1].words).toEqual(['five', 'six', 'seven', 'eight.'])
+  })
+
+  it('assigns pause type from the last visible token', () => {
+    // Capital continuation ("Seven") so the period is a real sentence end; hard
+    // boundaries then split it into a sentence-end Stack and a paragraph-end Stack.
+    const text = 'one two three four five six. Seven eight nine ten eleven twelve.'
+    const stacks = buildStacks(text, 8, NO_RULES)
+
+    expect(stacks.map((s) => s.type)).toEqual(['sentence-end', 'paragraph-end'])
+  })
+})
+
+// ── 9b. Hard sentence boundaries (ADR-0031 / SP-5) ─────────────────────────
+
+describe('hard sentence boundaries (ADR-0031)', () => {
+  it('never lets a Stack span a surviving period', () => {
+    const text = 'He walked home. She left the house quietly today.'
+    const stacks = buildStacks(text, 8, NO_RULES)
+    expect(stacks.map((s) => [s.type, s.words])).toEqual([
+      ['sentence-end', ['He', 'walked', 'home.']],
+      ['paragraph-end', ['She', 'left', 'the', 'house', 'quietly', 'today.']],
+    ])
+  })
+
+  it('splits a long sentence evenly via the unchanged DP (11 words @ N=8 → [6,5])', () => {
+    const text = 'The quick brown fox jumped over every lazy dog nearby today.'
+    const stacks = buildStacks(text, 8, NO_RULES)
+    expect(stacks.map((s) => s.words.length)).toEqual([6, 5])
+  })
+
+  it('splits a 17-word sentence into [6,6,5] @ N=8', () => {
+    const text =
+      'one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen.'
+    const stacks = buildStacks(text, 8, NO_RULES)
+    expect(stacks.map((s) => s.words.length)).toEqual([6, 6, 5])
+  })
+
+  it('does not split after a title abbreviation (Mr.)', () => {
+    const stacks = buildStacks('Mr. Smith went home.', 8, NO_RULES)
+    expect(stacks.map((s) => s.words)).toEqual([['Mr.', 'Smith', 'went', 'home.']])
+  })
+
+  it('does not split after a latinism abbreviation (e.g.)', () => {
+    const stacks = buildStacks('See e.g. the appendix now.', 8, NO_RULES)
+    expect(stacks.map((s) => s.words)).toEqual([['See', 'e.g.', 'the', 'appendix', 'now.']])
+  })
+
+  it('does not split inside a dotted acronym (U.S.A.)', () => {
+    const stacks = buildStacks('I saw the U.S.A. Then I left home.', 8, NO_RULES)
+    expect(stacks.map((s) => s.words)).toEqual([
+      ['I', 'saw', 'the', 'U.S.A.', 'Then', 'I', 'left', 'home.'],
+    ])
+  })
+
+  it('does not split before a lowercase dialogue tag (he asked)', () => {
+    const stacks = buildStacks('"Are you sure?" he asked. She left.', 8, NO_RULES)
+    expect(stacks.map((s) => [s.type, s.words])).toEqual([
+      ['sentence-end', ['"Are', 'you', 'sure?"', 'he', 'asked.']],
+      ['paragraph-end', ['She', 'left.']],
+    ])
+  })
+
+  it('still splits at a real boundary followed by a capital (home. She)', () => {
+    const stacks = buildStacks('He walked home. She left.', 8, NO_RULES)
+    expect(stacks.map((s) => [s.type, s.words])).toEqual([
+      ['sentence-end', ['He', 'walked', 'home.']],
+      ['paragraph-end', ['She', 'left.']],
+    ])
+  })
+
+  it('gives a standalone short sentence its own one-beat Stack', () => {
+    const text = 'The dog ran fast. He nodded. She left the house quietly.'
+    const stacks = buildStacks(text, 8, NO_RULES)
+    expect(stacks.map((s) => [s.type, s.words])).toEqual([
+      ['sentence-end', ['The', 'dog', 'ran', 'fast.']],
+      ['sentence-end', ['He', 'nodded.']],
+      ['paragraph-end', ['She', 'left', 'the', 'house', 'quietly.']],
+    ])
+  })
+})
 
 describe('multiple rules enabled simultaneously', () => {
   it('applies enumerations + commas together', () => {
     const text = '1. Hello, world.'
     const stacks = buildStacks(text, 5, { ...NO_RULES, enumerations: true, commas: true })
+    // Marker stays standalone (hard); the comma is now soft, so the short body
+    // clause packs into one stack instead of stuttering.
     expect(stacks[0].words).toEqual(['1.'])
-    // After the marker, comma rule applies
     const bodyStacks = stacks.slice(1)
-    expect(bodyStacks[0].words).toEqual(['Hello,'])
+    expect(bodyStacks.map((s) => s.words)).toEqual([['Hello,', 'world.']])
   })
 
   it('applies bullets + longWord together', () => {
@@ -507,12 +734,12 @@ describe('edge cases', () => {
     stacks.forEach((s) => expect(s.words.length).toBeGreaterThan(0))
   })
 
-  it('handles a headline longer than MAX_WORDS_PER_STACK gracefully', () => {
+  it('handles a headline longer than words_per_stack gracefully', () => {
     const text = 'THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG HERE NOW\n\nbody.'
-    const stacks = buildStacks(text, 3, { ...NO_RULES, headlines: true })
+    const stacks = buildStacks(text, 4, { ...NO_RULES, headlines: true })
     const headlineStacks = stacks.filter((s) => s.type === 'headline')
     expect(headlineStacks.length).toBeGreaterThan(1)
-    headlineStacks.forEach((s) => expect(s.words.length).toBeLessThanOrEqual(MAX_WORDS_PER_STACK))
+    headlineStacks.forEach((s) => expect(s.words.length).toBeLessThanOrEqual(4))
     // All headline words are accounted for
     const headlineWords = headlineStacks.flatMap((s) => s.words)
     expect(headlineWords).toEqual(
@@ -525,7 +752,16 @@ describe('edge cases', () => {
     const text = 'Alpha Beta Gamma Delta Epsilon Zeta Eta Theta done.'
     const stacks = buildStacks(text, 2, { ...NO_RULES, names: true })
     stacks.forEach((s) => expect(s.words.length).toBeGreaterThan(0))
-    stacks.forEach((s) => expect(s.words.length).toBeLessThanOrEqual(2))
+    expect(stacks[0].words).toEqual([
+      'Alpha',
+      'Beta',
+      'Gamma',
+      'Delta',
+      'Epsilon',
+      'Zeta',
+      'Eta',
+      'Theta',
+    ])
     const all = allWords(stacks)
     const sourceWords = text.split(/\s+/)
     expect(all.length).toBe(sourceWords.length)

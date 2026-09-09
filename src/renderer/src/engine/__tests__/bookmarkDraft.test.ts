@@ -2,11 +2,10 @@ import { describe, expect, it } from 'vitest'
 import {
   bookmarkFallbackLabel,
   bookmarkLabelForDraft,
-  bookmarkSnippetAtWordOffset,
   bookmarkWordOffsetAtIndex,
-  displayContentForBookmark,
   savedReadingPositionWordOffset,
 } from '../bookmarkDraft'
+import { buildStackWordIndex, buildTextWordIndex, displayRenditionOf } from '../wordIndex'
 import type { WordStack } from '../../types'
 
 describe('bookmark draft helpers', () => {
@@ -17,7 +16,7 @@ describe('bookmark draft helpers', () => {
       { words: ['six'], type: 'normal' },
     ]
 
-    expect(bookmarkWordOffsetAtIndex(stacks, 2)).toBe(5)
+    expect(bookmarkWordOffsetAtIndex(buildStackWordIndex(stacks), 2)).toBe(5)
   })
 
   it('converts a saved reading position stack to a forward-rule word offset', () => {
@@ -26,14 +25,15 @@ describe('bookmark draft helpers', () => {
       { words: ['three', 'four', 'five'], type: 'normal' },
     ]
 
-    expect(savedReadingPositionWordOffset(stacks, null)).toBe(0)
-    expect(savedReadingPositionWordOffset(stacks, 0)).toBe(0)
-    expect(savedReadingPositionWordOffset(stacks, 1)).toBe(2)
+    const index = buildStackWordIndex(stacks)
+    expect(savedReadingPositionWordOffset(index, null)).toBe(0)
+    expect(savedReadingPositionWordOffset(index, 0)).toBe(0)
+    expect(savedReadingPositionWordOffset(index, 1)).toBe(2)
   })
 
   it('prefers display content and normalizes form feeds for snippets', () => {
     expect(
-      displayContentForBookmark({
+      displayRenditionOf({
         content: 'raw text',
         content_display: 'display\ftext',
       })
@@ -41,7 +41,9 @@ describe('bookmark draft helpers', () => {
   })
 
   it('builds a short snippet from the word at the bookmark offset', () => {
-    expect(bookmarkSnippetAtWordOffset('one two three four five six', 2)).toBe(
+    // The snippet comes off the word index now, which walked the text once —
+    // this used to walk it twice, three lines apart (`architecture-depth/08`).
+    expect(buildTextWordIndex('one two three four five six').snippetAt(2)).toBe(
       'three four five six'
     )
   })

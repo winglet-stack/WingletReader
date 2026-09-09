@@ -15,6 +15,7 @@ import { useNavigation } from '../../contexts/NavigationContext'
 import { useLibrary } from '../../contexts/LibraryContext'
 import { useReader } from '../../contexts/ReaderContext'
 import { useSettings } from '../../contexts/SettingsContext'
+import HubStatsBanner from './HubStatsBanner'
 
 /**
  * Console hub (ADR-0011 / ADR-0012 §3 / ADR-0013 §2-3 — compact 3×2 grid).
@@ -251,8 +252,12 @@ export default function HubView({ appVersion }: HubViewProps) {
   return (
     <div className={`hub${settle ? ' hub--settle' : ''}`}>
       <div className="hub-face">
+        {/* The banner is the header row's middle child, not a row of its own:
+            the row is already 96px tall because of the dove, so the banner
+            costs the hub face no height and nothing below it moves. */}
         <header className="hub-header">
           <img src="/logo-on-dark.png" alt="" aria-hidden="true" className="hub-identity-dove" />
+          <HubStatsBanner />
           <span className="hub-status" aria-label="App version">
             <span className="hub-status-name">Alpha</span>
             {appVersion && <span className="hub-status-version">{appVersion}</span>}

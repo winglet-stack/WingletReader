@@ -2,6 +2,7 @@ import React from 'react'
 import type { Settings } from '../../types'
 import ChunkingSettingsTab from './ChunkingSettingsTab'
 import PortableDriveSection from './PortableDriveSection'
+import ReadingGoalsGroup from './ReadingGoalsGroup'
 import { useNavigation } from '../../contexts/NavigationContext'
 import ChromeIcon, { type ChromeIconName } from '../icons/ChromeIcon'
 
@@ -16,7 +17,8 @@ interface Props {
 
 // General settings landing: a uniform 5-card grid (Appearance, Reader defaults,
 // Read While Working, Import, Data) in the shared calm-grid language. Each card
-// is a centered column: glyph, title, and a one-line description.
+// is a centered column: glyph, title, and a one-line description. Below the grid
+// sits the inline Reading goals group (ADR-0035 §6) — controls, not a gateway.
 export default function GlobalSettingsBody({
   local,
   update,
@@ -70,56 +72,61 @@ export default function GlobalSettingsBody({
   }
 
   return (
-    <div className="rdc-grid" role="group" aria-label="Settings sections">
-      {/* Appearance carries its single control (theme) inline rather than
-          drilling in — the pills take the place of the description line. */}
-      <div className="rdc-card gsc-card gsc-card--static" role="group" aria-label="Appearance">
-        <div className="gsc-glyph" aria-hidden="true">
-          <ChromeIcon name="appearance" />
-        </div>
-        <div className="rdc-card-body">
-          <div className="settings-control settings-control-row gsc-theme-row">
-            {(['dark', 'light'] as const).map((t) => (
-              <button
-                key={t}
-                className={`theme-pill${local.theme === t ? ' theme-pill-active' : ''}`}
-                onClick={() => update({ theme: t })}
-              >
-                {t === 'dark' ? '◐ Dark' : '○ Light'}
-              </button>
-            ))}
+    <>
+      <div className="rdc-grid" role="group" aria-label="Settings sections">
+        {/* Appearance carries its single control (theme) inline rather than
+            drilling in — the pills take the place of the description line. */}
+        <div className="rdc-card gsc-card gsc-card--static" role="group" aria-label="Appearance">
+          <div className="gsc-glyph" aria-hidden="true">
+            <ChromeIcon name="appearance" />
+          </div>
+          <div className="rdc-card-body">
+            <div className="settings-control settings-control-row gsc-theme-row">
+              {(['dark', 'light'] as const).map((t) => (
+                <button
+                  key={t}
+                  className={`theme-pill${local.theme === t ? ' theme-pill-active' : ''}`}
+                  onClick={() => update({ theme: t })}
+                >
+                  {t === 'dark' ? '◐ Dark' : '○ Light'}
+                </button>
+              ))}
+            </div>
           </div>
         </div>
+        <GatewayCard
+          icon="reader-defaults"
+          label="Reader defaults"
+          desc="Playback · Grid · Text · Colors · Spacing"
+          ariaLabel="Edit Reader defaults"
+          onClick={onOpenReaderDefaults}
+        />
+        <GatewayCard
+          icon="overlay-reader"
+          label="Overlay Reader"
+          desc="Overlay · shortcuts · reader settings"
+          ariaLabel="Open Overlay Reader settings"
+          onClick={() => setSettingsSubview('overlay-reader')}
+        />
+        <GatewayCard
+          icon="import"
+          label="Import"
+          desc="Restore from backup · chunking rules"
+          ariaLabel="Open Import settings"
+          onClick={() => setSettingsSubview('import')}
+        />
+        <GatewayCard
+          icon="data"
+          label="Data"
+          desc="Export all texts and settings to JSON"
+          ariaLabel="Open Data settings"
+          onClick={() => setSettingsSubview('data')}
+        />
       </div>
-      <GatewayCard
-        icon="reader-defaults"
-        label="Reader defaults"
-        desc="Playback · Grid · Text · Colors · Spacing"
-        ariaLabel="Edit Reader defaults"
-        onClick={onOpenReaderDefaults}
-      />
-      <GatewayCard
-        icon="overlay-reader"
-        label="Overlay Reader"
-        desc="Overlay · shortcuts · reader settings"
-        ariaLabel="Open Overlay Reader settings"
-        onClick={() => setSettingsSubview('overlay-reader')}
-      />
-      <GatewayCard
-        icon="import"
-        label="Import"
-        desc="Restore from backup · chunking rules"
-        ariaLabel="Open Import settings"
-        onClick={() => setSettingsSubview('import')}
-      />
-      <GatewayCard
-        icon="data"
-        label="Data"
-        desc="Export all texts and settings to JSON"
-        ariaLabel="Open Data settings"
-        onClick={() => setSettingsSubview('data')}
-      />
-    </div>
+      {/* Reading goals sits below the grid rather than in it: two steppers are not
+          a gateway, and a sixth card would break the 5-card rhythm (ADR-0035 §6). */}
+      <ReadingGoalsGroup local={local} update={update} />
+    </>
   )
 }
 

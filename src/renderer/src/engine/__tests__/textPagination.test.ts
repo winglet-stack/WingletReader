@@ -1,12 +1,25 @@
 import { describe, it, expect } from 'vitest'
 import {
-  computePageStarts,
+  computePageStartsFromCounts,
   pageForWordOffset,
   pageRange,
   DEFAULT_TARGET_WORDS,
   DEFAULT_HARD_CAP,
+  type PageOptions,
 } from '../textPagination'
-import { buildWordPositions, buildParagraphWordCounts } from '../wordHighlight'
+import { scanText } from '../wordHighlight'
+
+/*
+ * `computePageStarts` walked the text itself. `architecture-depth/08` left the
+ * pagination engine pure arithmetic over the counts `scanText` produced — the
+ * whole-book walk happens once, in the word index — so this adapter supplies
+ * the same call shape and every case below stays as written.
+ */
+const computePageStarts = (content: string, options?: PageOptions): number[] =>
+  computePageStartsFromCounts(scanText(content).paragraphWordCounts, options)
+
+const buildWordPositions = (content: string) => scanText(content).wordPositions
+const buildParagraphWordCounts = (content: string) => scanText(content).paragraphWordCounts
 
 /** A paragraph of `n` distinct words. */
 function para(n: number, prefix = 'w'): string {

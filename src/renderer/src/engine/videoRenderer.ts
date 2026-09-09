@@ -2,8 +2,18 @@ import { Muxer, ArrayBufferTarget } from 'mp4-muxer'
 import { buildStacks, pauseMs } from './tokenizer'
 import { resolveHighlightTextColor } from './highlightColor'
 import { createMeasureWidth, type ReaderTextMeasurer } from './readerDisplayScale'
-import { solveReaderLayout, type SolveReaderLayoutResult } from './readerLayoutSolver'
-import { computeHighlightedSlots } from './highlightingEngine'
+import {
+  HEADLINE_RULE,
+  INITIAL_REVEAL_STATE,
+  deriveFullBlockFrame,
+  deriveReaderFrame,
+  readerStageContentBox,
+  type ReaderFrame,
+  type ReaderFrameConfig,
+  type ReaderFrameSlot,
+  type ReaderStageBox,
+} from './readerFrame'
+import type { RevealState } from './stackLayout'
 import { defaultReaderBg, defaultReaderFg } from './transmuteConfig'
 import type { WordStack, TransmuteConfig } from '../types'
 
@@ -14,23 +24,14 @@ const TARGET_BITRATE_BPS = 200_000 // generous upper bound for simple text video
 // bounded during long exports (a ~55-min video has ~40 k frames at 12 fps).
 const MAX_ENCODE_QUEUE = 30
 
-// Layout constants mirroring the reader's CSS so the video matches the reader view.
-//   .reader-stage   { padding: 40px 48px }
-//   .stack-slot     { padding: 14px 28px }
-//   .stack-words    { line-height: 1.2 }
-//   .stack-headline { gap: 12px }
-//   .headline-rule  { width: 40px; height: 2px; opacity: 0.5 }
-const STAGE_PAD_X = 48
-const STAGE_PAD_Y = 40
-const SLOT_PAD_X = 28
-const SLOT_PAD_Y = 14
-const HEADLINE_RULE_W = 40
-const HEADLINE_RULE_H = 2
-const HEADLINE_RULE_GAP = 12
-const HEADLINE_RULE_OPACITY = 0.5
-const MIN_FONT_SIZE = 12
-const ABSOLUTE_MIN_FONT_SIZE = 6
-const TEXT_LINE_HEIGHT = 1.2
+// Geometry is not decided here. Every size, gap, position, reveal and divider
+// state comes from the reader frame (`engine/readerFrame.ts`); this module maps
+// that description onto a canvas and nothing more. The numbers below are the
+// canvas medium's own: how a filled shape stands in for a CSS background, and the
+// progress overlay, which has no reader counterpart at all.
+const HIGHLIGHT_BOX_PAD_RATIO = 0.25 // filled highlight box inset, as a fraction of the slot font size
+const DIVIDER_LINE_ALPHA_HEX = '55' // ≈ .stack-divider's 0.5 opacity, as an alpha suffix
+const DIVIDER_DOT_SIZE = 10 // .stack-divider--dot::after — dormant (focal-points view)
 const TRANSMUTE_MAX_WORDS_PER_STACK = 20
 
 // Progress overlay constants (used when config.showProgressOverlay is true)
@@ -48,13 +49,13 @@ const OVERLAY_BAR_BOTTOM_PAD = 10 // clearance from canvas bottom edge (px)
 //
 // SUPPORTED — mapped from Reader settings via TransmuteConfig:
 //   bgColor, bgColorOverride, transparentBackground → drawFrame (bg fill logic)
-//   bgColor, textColor, fontFamily, fontSize        → drawFrame
-//   stackVerticalOffset                             → drawFrame (Y shift, all modes)
-//   stackHorizontalOffset                           → drawFrame (X shift, all modes, clamped)
-//   highlightActive, highlightColor, highlightTextColor, highlightMode,
-//   highlightPanningChunkSize                      → drawFrame
-//   linesEnabled, linesCount, linesRowGap, stacksVisible, stackGap → batching + layout
-//   showChunkDividers                               → grid mode column separators
+//   textColor                                       → drawFrame (colour resolution)
+//   highlightColor, highlightTextColor              → drawFrame (colour resolution)
+//   fontFamily, fontSize, stackVerticalOffset, stackHorizontalOffset,
+//   linesCount, linesRowGap, stacksVisible, stackGap, showChunkDividers,
+//   highlightActive, highlightMode, highlightPanningChunkSize
+//                                                   → readerFrameConfigFromTransmute,
+//                                                     then the reader frame decides
 //   bpm, wordsPerStack, pauseAtSentences, pauseAtHeadlines → timing calculations
 //   chunkRule*                                      → buildStacksForTransmute
 //
@@ -162,104 +163,142 @@ export function formatFileSize(bytes: number): string {
  * Returns the number of stacks shown per video frame.
  *
  * Matches the reader's blockSize = linesCount × stacksVisible. The reader
- * always shows stacksVisible stacks per row; linesEnabled controls whether
- * multiple rows are stacked vertically.
+ * always shows stacksVisible stacks per row; a linesCount of 1 is single-line.
  */
 export function frameBatchSize(config: TransmuteConfig): number {
   const cols = Math.max(1, config.stacksVisible)
-  const rows = (config.linesEnabled && config.linesCount > 1)
-    ? Math.max(1, config.linesCount)
-    : 1
+  const rows = Math.max(1, config.linesCount)
   return rows * cols
 }
 
 type DrawContext = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D
 type MeasureTextContext = Pick<DrawContext, 'font' | 'measureText'>
 
-export interface DisplayStack {
-  words: string[]
-  isHeadline: boolean
+/** A reader frame plus the canvas box it was solved against. */
+export interface VideoReaderFrame {
+  frame: ReaderFrame
+  /** Content box inside the canvas — the box `frame.geometry` is positioned in. */
+  stage: ReaderStageBox
+  /** Canvas dimensions, so the painter needs no second source for them. */
+  width: number
+  height: number
 }
 
-export interface ReaderLikeFrame {
-  displayStacks: DisplayStack[]
-  currentLineIdx: number
-  currentSlotIdx: number
-}
-
-export interface VideoReaderLayout {
-  cols: number
-  rows: number
-  leftPad: number
-  stageWidth: number
-  stageHeight: number
-  layout: SolveReaderLayoutResult
-}
-
-function gridShape(config: TransmuteConfig, effectiveLinesCount?: number): { cols: number; rows: number; blockSize: number } {
-  const cols = Math.max(1, config.stacksVisible)
-  const configuredRows = (config.linesEnabled && config.linesCount > 1)
-    ? Math.max(1, config.linesCount)
-    : 1
-  const rows = Math.max(1, Math.min(configuredRows, Math.floor(effectiveLinesCount ?? configuredRows)))
-  return { cols, rows, blockSize: cols * rows }
-}
-
-export function buildReaderLikeFrame(
-  stacks: WordStack[],
-  currentIndex: number,
-  config: TransmuteConfig,
-  effectiveLinesCount?: number
-): ReaderLikeFrame {
-  const { cols, rows, blockSize } = gridShape(config, effectiveLinesCount)
-  const safeIndex = clamp(currentIndex, 0, Math.max(0, stacks.length - 1))
-  const blockIndex = safeIndex % blockSize
-  const blockStart = safeIndex - blockIndex
-  const currentLineIdx = Math.floor(blockIndex / cols)
-  const currentSlotIdx = blockIndex % cols
-
-  let revealUpToSlot = currentSlotIdx
-  if ((config.highlightMode ?? 'default') === 'panning-bar') {
-    const chunkSize = (config.highlightPanningChunkSize ?? 0) > 0
-      ? config.highlightPanningChunkSize
-      : cols
-    if (currentSlotIdx % chunkSize === 0) {
-      const halfChunk = Math.ceil(chunkSize / 2)
-      revealUpToSlot = Math.min(currentSlotIdx + halfChunk - 1, cols - 1)
-    }
+/**
+ * TransmuteConfig → ReaderFrameConfig.
+ *
+ * The Transmute config carries camelCase twins of the snake_case reader settings;
+ * the frame module speaks reader settings, so the conversion happens here, at the
+ * painter's edge, and nothing camelCase reaches the frame module.
+ *
+ * Two fields have no Transmute twin: video has no line-box anchor of its own (the
+ * stage is always centred) and focal-points view is unavailable in the renderer
+ * (see the settings-coverage notes above).
+ */
+function readerFrameConfigFromTransmute(config: TransmuteConfig): ReaderFrameConfig {
+  return {
+    stacksVisible: Math.max(1, config.stacksVisible),
+    wordsPerStack: Math.max(1, config.wordsPerStack),
+    linesCount: Math.max(1, config.linesCount),
+    linesAnchor: 'center',
+    fontSize: config.fontSize,
+    stackGap: Math.max(0, config.stackGap ?? 32),
+    rowGap: Math.max(0, config.linesRowGap ?? 8),
+    stackVerticalOffset: config.stackVerticalOffset ?? 0,
+    stackHorizontalOffset: config.stackHorizontalOffset ?? 0,
+    fontFamily: videoFontFamily(config),
+    fontWeight: 700,
+    highlightActive: config.highlightActive,
+    highlightMode: config.highlightMode ?? 'default',
+    highlightPanningChunkSize: config.highlightPanningChunkSize ?? 0,
+    focalPointsView: false,
+    showChunkDividers: config.showChunkDividers,
   }
+}
 
-  const displayStacks = Array.from({ length: blockSize }, (_, flatIdx) => {
-    const r = Math.floor(flatIdx / cols)
-    const c = flatIdx % cols
-    const visible =
-      r < currentLineIdx || (r === currentLineIdx && c <= revealUpToSlot)
-    if (visible) {
-      const stackIdx = blockStart + r * cols + c
-      if (stackIdx < stacks.length) {
-        const s = stacks[stackIdx]
-        return { words: s.words, isHeadline: s.type === 'headline' }
-      }
-    }
-    return { words: [] as string[], isHeadline: false }
+function videoFontFamily(config: TransmuteConfig): string {
+  return config.fontFamily ? `${config.fontFamily}, sans-serif` : 'sans-serif'
+}
+
+function createContextMeasureWidth(ctx: DrawContext): ReaderTextMeasurer {
+  return createMeasureWidth(() => ctx as MeasureTextContext)
+}
+
+/** The stage content box for a canvas of this size, overlay reservation included. */
+function videoStageBox(config: TransmuteConfig, width: number, height: number): ReaderStageBox {
+  return readerStageContentBox({
+    width,
+    height,
+    extraLeftInset: config.showProgressOverlay ? OVERLAY_RESERVED_W : 0,
+  })
+}
+
+export interface BuildVideoFrameInput {
+  ctx: DrawContext
+  stacks: WordStack[]
+  currentIndex: number
+  config: TransmuteConfig
+  width: number
+  height: number
+  /** Sticky reveal carried in from the previous frame. Omit for a fresh sequence. */
+  reveal?: RevealState
+  /** Reuse one measurer across a sequence so its text cache survives. */
+  measureWidth?: ReaderTextMeasurer
+}
+
+/**
+ * The frame for one beat of the exported video.
+ *
+ * Every geometric decision — block position, reveal, reserved-but-empty slots,
+ * font size, gaps, effective line count, headline treatment, divider state —
+ * belongs to the frame module. This function only supplies the stage box the
+ * canvas provides in place of a measured DOM element.
+ */
+export function buildVideoFrame(input: BuildVideoFrameInput): VideoReaderFrame {
+  const { ctx, stacks, currentIndex, config, width, height } = input
+  const stage = videoStageBox(config, width, height)
+  const frame = deriveReaderFrame({
+    stacks,
+    currentIndex,
+    config: readerFrameConfigFromTransmute(config),
+    stage,
+    measureWidth: input.measureWidth ?? createContextMeasureWidth(ctx),
+    reveal: input.reveal ?? INITIAL_REVEAL_STATE,
   })
 
-  return { displayStacks, currentLineIdx, currentSlotIdx }
+  return { frame, stage, width, height }
+}
+
+/**
+ * The frame a still preview shows: one complete block, at the beat where the
+ * line box is full (see `fullBlockFrameInputs`).
+ */
+export function buildVideoPreviewFrame(input: Omit<BuildVideoFrameInput, 'currentIndex' | 'reveal'>): VideoReaderFrame {
+  const { ctx, stacks, config, width, height } = input
+  const stage = videoStageBox(config, width, height)
+  const frame = deriveFullBlockFrame({
+    stacks,
+    config: readerFrameConfigFromTransmute(config),
+    stage,
+    measureWidth: input.measureWidth ?? createContextMeasureWidth(ctx),
+  })
+
+  return { frame, stage, width, height }
 }
 
 interface TextBoxMetrics {
   width: number
   ascent: number
   descent: number
-  height: number
 }
 
-function clamp(val: number, min: number, max: number): number {
-  return Math.max(min, Math.min(max, val))
-}
-
+/**
+ * Canvas font at a size the frame already decided. A fractional solved size (the
+ * solver's stage-4 release valve produces them) is floored rather than rounded, so
+ * a whole-pixel canvas never paints wider than the size that was solved to fit.
+ */
 function fontSpec(size: number, family: string): string {
-  return `bold ${Math.max(1, Math.round(size))}px ${family}`
+  return `bold ${Math.max(1, Math.floor(size))}px ${family}`
 }
 
 function positiveMetric(value: number | undefined, fallback: number): number {
@@ -268,81 +307,19 @@ function positiveMetric(value: number | undefined, fallback: number): number {
     : fallback
 }
 
+/**
+ * Canvas text metrics at an already-decided size. This measures where the glyphs
+ * sit on their baseline; it never chooses the size.
+ */
 function measureTextBox(ctx: DrawContext, text: string, size: number, family: string): TextBoxMetrics {
   ctx.font = fontSpec(size, family)
   const metrics = ctx.measureText(text)
-  const ascent = positiveMetric(metrics.actualBoundingBoxAscent, size * 0.8)
-  const descent = positiveMetric(metrics.actualBoundingBoxDescent, size * 0.2)
 
   return {
     width: metrics.width,
-    ascent,
-    descent,
-    height: Math.max(ascent + descent, size * TEXT_LINE_HEIGHT)
+    ascent: positiveMetric(metrics.actualBoundingBoxAscent, size * 0.8),
+    descent: positiveMetric(metrics.actualBoundingBoxDescent, size * 0.2),
   }
-}
-
-function textFits(box: TextBoxMetrics, maxW: number, maxH: number): boolean {
-  return box.width <= maxW && box.height <= maxH
-}
-
-function fitFontSize(
-  ctx: DrawContext,
-  text: string,
-  family: string,
-  baseSize: number,
-  maxW: number,
-  maxH: number
-): { size: number; box: TextBoxMetrics } {
-  let size = Math.max(ABSOLUTE_MIN_FONT_SIZE, Math.round(baseSize))
-  let box = measureTextBox(ctx, text, size, family)
-  const readableMin = Math.min(MIN_FONT_SIZE, size)
-
-  while (size > readableMin && !textFits(box, maxW, maxH)) {
-    const widthScale = box.width > 0 ? maxW / box.width : 1
-    const heightScale = box.height > 0 ? maxH / box.height : 1
-    const scale = Math.min(0.9, widthScale, heightScale)
-    const nextSize = Math.max(readableMin, Math.floor(size * Math.max(0.2, scale)))
-    size = nextSize < size ? nextSize : size - 1
-    box = measureTextBox(ctx, text, size, family)
-  }
-
-  while (size > ABSOLUTE_MIN_FONT_SIZE && !textFits(box, maxW, maxH)) {
-    size -= 1
-    box = measureTextBox(ctx, text, size, family)
-  }
-
-  return { size, box }
-}
-
-function baselineForCenteredText(
-  centerY: number,
-  box: TextBoxMetrics,
-  topBound: number,
-  bottomBound: number
-): number {
-  const naturalBaseline = centerY + (box.ascent - box.descent) / 2
-  const minBaseline = topBound + box.ascent
-  const maxBaseline = bottomBound - box.descent
-
-  if (minBaseline > maxBaseline) {
-    return (topBound + bottomBound + box.ascent - box.descent) / 2
-  }
-
-  return clamp(naturalBaseline, minBaseline, maxBaseline)
-}
-
-function textCenterFromBaseline(baseline: number, box: TextBoxMetrics): number {
-  return baseline + (box.descent - box.ascent) / 2
-}
-
-function headlineTextMaxWidth(maxW: number): number {
-  return Math.max(20, maxW - 2 * (HEADLINE_RULE_W + HEADLINE_RULE_GAP))
-}
-
-function displayText(stack: { words: string[]; isHeadline: boolean }): string {
-  const rawText = stack.words.join(' ')
-  return stack.isHeadline ? rawText.toUpperCase() : rawText
 }
 
 function readerTheme(config: TransmuteConfig): 'dark' | 'light' {
@@ -358,85 +335,25 @@ function resolvedHighlightText(config: TransmuteConfig): string {
     ?? defaultReaderBg(readerTheme(config))
 }
 
-function effectiveLeftPad(config: TransmuteConfig): number {
-  return STAGE_PAD_X + (config.showProgressOverlay ? OVERLAY_RESERVED_W : 0)
-}
-
-function stageWidth(width: number, leftPad: number): number {
-  return Math.max(40, width - leftPad - STAGE_PAD_X)
-}
-
-function stageHeight(height: number): number {
-  return Math.max(40, height - 2 * STAGE_PAD_Y)
-}
-
-function createContextMeasureWidth(ctx: DrawContext): ReaderTextMeasurer {
-  return createMeasureWidth(() => ctx as MeasureTextContext)
-}
-
-export function resolveVideoReaderLayout(
-  ctx: DrawContext,
-  displayStacks: { words: string[]; isHeadline: boolean }[],
-  config: TransmuteConfig,
-  width: number,
-  height: number,
-  measureWidth: ReaderTextMeasurer = createContextMeasureWidth(ctx)
-): VideoReaderLayout {
-  const { cols, rows } = gridShape(config)
-  const leftPad = effectiveLeftPad(config)
-  const stageContentW = stageWidth(width, leftPad)
-  const stageContentH = stageHeight(height)
-  const layout = solveReaderLayout({
-    stageWidth: stageContentW,
-    stageHeight: stageContentH,
-    stackTexts: displayStacks.map(displayText).filter(Boolean),
-    stacksVisible: cols,
-    wordsPerStack: config.wordsPerStack,
-    fontSize: config.fontSize,
-    linesCount: rows,
-    stackGap: Math.max(0, config.stackGap ?? 32),
-    rowGap: Math.max(0, config.linesRowGap ?? 8),
-    stackVerticalOffset: config.stackVerticalOffset ?? 0,
-    stackHorizontalOffset: config.stackHorizontalOffset ?? 0,
-    fontFamily: config.fontFamily ? `${config.fontFamily}, sans-serif` : 'sans-serif',
-    fontWeight: 700,
-    measureWidth,
-  })
-
-  return {
-    cols: layout.stacksVisible,
-    rows: layout.effectiveLinesCount,
-    leftPad,
-    stageWidth: stageContentW,
-    stageHeight: stageContentH,
-    layout,
-  }
+function frameHasContent(frame: ReaderFrame): boolean {
+  return frame.rows.some((row) => row.slots.some((slot) => slot.stack !== null))
 }
 
 /**
  * Render one video frame onto the canvas context.
  *
- * Routing:
- *   • effectiveCols=1 AND effectiveRows=1 → _drawSingleStackFrame (centred, with highlight)
- *   • effectiveCols>1 OR effectiveRows>1  → _drawGridFrame (multi-column / multi-row grid)
- *
- * effectiveCols = max(1, stacksVisible)
- * effectiveRows = linesEnabled && linesCount>1 ? linesCount : 1
+ * This is a painter: it maps the reader frame onto canvas primitives and decides
+ * nothing about geometry. Colours are the one thing it resolves itself — the DOM
+ * painter gets them from CSS variables, which a canvas does not have.
  */
 export function drawFrame(
   ctx: DrawContext,
-  displayStacks: DisplayStack[],
+  videoFrame: VideoReaderFrame,
   config: TransmuteConfig,
-  width: number,
-  height: number,
-  progressFraction?: number,
-  frameState?: Pick<ReaderLikeFrame, 'currentLineIdx' | 'currentSlotIdx'>,
-  resolvedLayout?: VideoReaderLayout,
-  layoutMeasureWidth?: ReaderTextMeasurer
+  progressFraction?: number
 ): void {
+  const { frame, width, height } = videoFrame
   const bg = config.bgColorOverride || config.bgColor || defaultReaderBg(readerTheme(config))
-  const fg = config.textColor || defaultReaderFg(readerTheme(config))
-  const family = config.fontFamily ? `${config.fontFamily}, sans-serif` : 'sans-serif'
 
   if (!config.transparentBackground) {
     ctx.fillStyle = bg
@@ -445,226 +362,200 @@ export function drawFrame(
     ctx.clearRect(0, 0, width, height)
   }
 
-  if (displayStacks.length === 0) return
+  if (!frameHasContent(frame)) return
 
-  const videoLayout = resolvedLayout ?? resolveVideoReaderLayout(ctx, displayStacks, config, width, height, layoutMeasureWidth)
-  const effectiveCols = videoLayout.cols
-  const effectiveRows = videoLayout.rows
-  const currentLineIdx = frameState?.currentLineIdx ?? 0
-  const currentSlotIdx = frameState?.currentSlotIdx ?? 0
-  const isSlotHighlighted = computeHighlightedSlots(
-    config.highlightMode ?? 'default',
-    currentLineIdx,
-    currentSlotIdx,
-    effectiveCols,
-    { chunkSize: config.highlightPanningChunkSize ?? 0 }
-  )
-
-  const drawableStacks = displayStacks.slice(0, effectiveCols * effectiveRows)
-
-  if (effectiveCols > 1 || effectiveRows > 1) {
-    _drawGridFrame(ctx, drawableStacks, config, width, height, fg, family, videoLayout, isSlotHighlighted)
-  } else {
-    _drawSingleStackFrame(ctx, drawableStacks[0], config, width, height, fg, family, videoLayout, isSlotHighlighted(0, 0))
-  }
+  _drawStackGrid(ctx, videoFrame, config)
 
   if (config.showProgressOverlay && progressFraction !== undefined) {
     _drawProgressOverlay(ctx, config, width, height, progressFraction)
   }
 }
 
-function layoutBox(videoLayout: VideoReaderLayout): { x: number; y: number; width: number; height: number } {
-  const { layout } = videoLayout
+/** Where the solved content box sits inside the stage box. */
+function contentOrigin(videoFrame: VideoReaderFrame): { x: number; y: number } {
+  const { stage, frame } = videoFrame
+  const { geometry } = frame
+
   return {
-    x: videoLayout.leftPad + (videoLayout.stageWidth - layout.width) / 2 + layout.clampedHorizontalOffset,
-    y: STAGE_PAD_Y + (videoLayout.stageHeight - layout.height) / 2 + layout.clampedVerticalOffset,
-    width: layout.width,
-    height: layout.height,
+    x: stage.x + (stage.width - geometry.contentWidth) / 2 + geometry.horizontalOffset,
+    y: geometry.anchor === 'top'
+      ? stage.y + geometry.verticalOffset
+      : stage.y + (stage.height - geometry.contentHeight) / 2 + geometry.verticalOffset,
   }
 }
 
-function _drawSingleStackFrame(
-  ctx: DrawContext,
-  stack: DisplayStack,
-  config: TransmuteConfig,
-  width: number,
-  height: number,
-  fg: string,
-  family: string,
-  videoLayout: VideoReaderLayout,
-  slotHighlighted: boolean
-): void {
-  const isHeadline = stack.isHeadline
-
-  // Headlines are rendered uppercase to match .stack-headline { text-transform: uppercase }
-  const text = displayText(stack)
-  const readerFontSize = videoLayout.layout.effectiveFontSize
-  const baseSize = isHeadline ? Math.round(readerFontSize * 0.7) : readerFontSize
-  const boxLayout = layoutBox(videoLayout)
-
-  // Available text width = solved content width minus slot padding on each side.
-  const maxW = Math.max(40, boxLayout.width - 2 * SLOT_PAD_X)
-  const maxTextW = isHeadline ? headlineTextMaxWidth(maxW) : maxW
-  const maxTextH = Math.max(8, boxLayout.height - 2 * SLOT_PAD_Y)
-  const { size, box } = fitFontSize(ctx, text, family, baseSize, maxTextW, maxTextH)
-
-  const cx = boxLayout.x + boxLayout.width / 2
-  const cy = boxLayout.y + boxLayout.height / 2
-
-  const accentColor = resolvedHighlightColor(config, fg)
-
-  const isHighlighted = config.highlightActive && slotHighlighted && stack.words.length > 0 && !isHeadline
-  const pad = isHighlighted ? Math.round(size * 0.25) : 0
-  const baseline = baselineForCenteredText(
-    cy,
-    box,
-    STAGE_PAD_Y + SLOT_PAD_Y + pad,
-    height - STAGE_PAD_Y - SLOT_PAD_Y - pad
-  )
-  const textCenterY = textCenterFromBaseline(baseline, box)
-  const textW = box.width
-
-  if (isHighlighted) {
-    // Filled highlight box — matches reader's .stack-slot--active { background: highlightColor }
-    const hColor = resolvedHighlightColor(config, fg)
-    ctx.fillStyle = hColor
-    ctx.fillRect(
-      Math.round(cx - textW / 2 - pad),
-      Math.round(baseline - box.ascent - pad),
-      Math.round(textW + 2 * pad),
-      Math.round(box.ascent + box.descent + 2 * pad)
-    )
+/** Paint every row and slot of the frame. Reserved-but-empty slots hold their space. */
+function _drawStackGrid(ctx: DrawContext, videoFrame: VideoReaderFrame, config: TransmuteConfig): void {
+  const { frame } = videoFrame
+  const { geometry } = frame
+  const cols = frame.stacksVisible
+  const origin = contentOrigin(videoFrame)
+  const cellWidth = (geometry.contentWidth - Math.max(0, cols - 1) * geometry.stackGap) / cols
+  const cellHeight = geometry.rowHeight
+  const family = videoFontFamily(config)
+  const fg = config.textColor || defaultReaderFg(readerTheme(config))
+  // Headline text uses var(--accent) in the reader; the video has no accent of its
+  // own and has always drawn headlines in the highlight colour.
+  const accent = resolvedHighlightColor(config, fg)
+  const colors: FrameColors = {
+    fg,
+    accent,
+    highlight: accent,
+    highlightText: resolvedHighlightText(config),
   }
 
-  if (isHeadline) {
-    // Decorative horizontal rules flanking headline text —
-    // matches .headline-rule { width: 40px; height: 2px; opacity: 0.5 }
-    const gap = HEADLINE_RULE_GAP
-    const ruleY = Math.round(textCenterY - HEADLINE_RULE_H / 2)
+  for (const row of frame.rows) {
+    const cellY = origin.y + row.rowIndex * (cellHeight + geometry.rowGap)
+    // Adjacent highlighted slots read as one bar, so the divider between them needs
+    // the box its left neighbour painted (.stack-slot--connected-left/right).
+    let leftHighlight: CellBox | null = null
+
+    for (const slot of row.slots) {
+      const cellX = origin.x + slot.colIndex * (cellWidth + geometry.stackGap)
+      const highlight = slot.stack === null
+        ? null
+        : _drawSlotText(ctx, slot, {
+          x: cellX,
+          y: cellY,
+          width: cellWidth,
+          height: cellHeight,
+        }, family, colors)
+
+      if (slot.divider) {
+        _drawDivider(
+          ctx,
+          slot.divider,
+          { x: cellX - geometry.stackGap, y: cellY, width: geometry.stackGap, height: cellHeight },
+          colors,
+          leftHighlight,
+          highlight
+        )
+      }
+
+      leftHighlight = highlight
+    }
+  }
+}
+
+interface FrameColors {
+  fg: string
+  accent: string
+  highlight: string
+  highlightText: string
+}
+
+interface CellBox {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+/** Paints one slot; returns the highlight box it filled, if any. */
+function _drawSlotText(
+  ctx: DrawContext,
+  slot: ReaderFrameSlot,
+  cell: CellBox,
+  family: string,
+  colors: FrameColors
+): CellBox | null {
+  // `displayText` is already uppercased for headlines and `fontSize` already
+  // carries the headline scale — the frame decided both.
+  const text = slot.displayText
+  const box = measureTextBox(ctx, text, slot.fontSize, family)
+  const cx = cell.x + cell.width / 2
+  const cy = cell.y + cell.height / 2
+  const baseline = cy + (box.ascent - box.descent) / 2
+  const textCenterY = baseline + (box.descent - box.ascent) / 2
+
+  // A headline keeps its own treatment instead of the filled highlight box, as
+  // it does in the exported video today.
+  const highlighted = slot.highlighted && !slot.isHeadline
+  let highlightBox: CellBox | null = null
+
+  if (highlighted) {
+    // Filled box behind the words — the canvas form of .stack-slot--active.
+    const pad = Math.round(slot.fontSize * HIGHLIGHT_BOX_PAD_RATIO)
+    highlightBox = {
+      x: Math.round(cx - box.width / 2 - pad),
+      y: Math.round(baseline - box.ascent - pad),
+      width: Math.round(box.width + 2 * pad),
+      height: Math.round(box.ascent + box.descent + 2 * pad),
+    }
+    ctx.fillStyle = colors.highlight
+    ctx.fillRect(highlightBox.x, highlightBox.y, highlightBox.width, highlightBox.height)
+  }
+
+  if (slot.isHeadline) {
+    const ruleY = Math.round(textCenterY - HEADLINE_RULE.height / 2)
     ctx.save()
-    ctx.globalAlpha = HEADLINE_RULE_OPACITY
-    ctx.fillStyle = accentColor
-    ctx.fillRect(Math.round(cx - textW / 2 - gap - HEADLINE_RULE_W), ruleY, HEADLINE_RULE_W, HEADLINE_RULE_H)
-    ctx.fillRect(Math.round(cx + textW / 2 + gap), ruleY, HEADLINE_RULE_W, HEADLINE_RULE_H)
+    ctx.globalAlpha = HEADLINE_RULE.opacity
+    ctx.fillStyle = colors.accent
+    ctx.fillRect(
+      Math.round(cx - box.width / 2 - HEADLINE_RULE.gap - HEADLINE_RULE.width),
+      ruleY,
+      HEADLINE_RULE.width,
+      HEADLINE_RULE.height
+    )
+    ctx.fillRect(Math.round(cx + box.width / 2 + HEADLINE_RULE.gap), ruleY, HEADLINE_RULE.width, HEADLINE_RULE.height)
     ctx.restore()
-    ctx.fillStyle = isHighlighted ? resolvedHighlightText(config) : accentColor
+    ctx.fillStyle = highlighted ? colors.highlightText : colors.accent
   } else {
-    ctx.fillStyle = isHighlighted ? resolvedHighlightText(config) : fg
+    ctx.fillStyle = highlighted ? colors.highlightText : colors.fg
   }
 
   ctx.textAlign = 'center'
   ctx.textBaseline = 'alphabetic'
   ctx.fillText(text, cx, baseline)
+
+  return highlightBox
 }
 
 /**
- * Draw a multi-column / multi-row grid of stacks.
+ * The divider in the gap to a slot's left, in whichever state the frame reports.
  *
- * Replaces the old _drawMultiLineFrame and also handles the single-row
- * multi-column case (effectiveRows=1, effectiveCols>1) that the reader
- * shows when stacksVisible>1 regardless of linesEnabled.
- *
- * Highlighting mirrors the reader's current slot predicate, including
- * progressive and panning-bar modes.
+ * An **active** divider is the reader's connected highlight (.stack-divider--active
+ * plus .stack-slot--connected-left/right): the two adjacent highlight boxes are
+ * joined into one continuous bar. An inactive visible divider is the hairline rule,
+ * and a dot belongs to the dormant focal-points view.
  */
-function _drawGridFrame(
+function _drawDivider(
   ctx: DrawContext,
-  displayStacks: DisplayStack[],
-  config: TransmuteConfig,
-  width: number,
-  height: number,
-  fg: string,
-  family: string,
-  videoLayout: VideoReaderLayout,
-  isSlotHighlighted: (rowIdx: number, colIdx: number) => boolean
+  divider: NonNullable<ReaderFrameSlot['divider']>,
+  gap: CellBox,
+  colors: FrameColors,
+  leftHighlight: CellBox | null,
+  rightHighlight: CellBox | null
 ): void {
-  const { cols, rows, layout } = videoLayout
-  const colGap = layout.effectiveStackGap
-  const rowGap = layout.effectiveRowGap
-  const readerFontSize = layout.effectiveFontSize
-  const boxLayout = layoutBox(videoLayout)
+  if (!divider.visible || gap.width <= 0) return
 
-  const cellW = (boxLayout.width - (cols - 1) * colGap) / cols
-  const cellH = (boxLayout.height - (rows - 1) * rowGap) / rows
-
-  // Text fits within the slot padding area — matches reader's slot padding (28px each side)
-  const maxTextW = Math.max(40, cellW - 2 * SLOT_PAD_X)
-
-  const accentColor = resolvedHighlightColor(config, fg)
-  const hColor = resolvedHighlightColor(config, fg)
-  const hTextColor = resolvedHighlightText(config)
-
-  for (let row = 0; row < rows; row++) {
-    for (let col = 0; col < cols; col++) {
-      const idx = row * cols + col
-      if (idx >= displayStacks.length) break
-
-      const stack = displayStacks[idx]
-      const { isHeadline } = stack
-      const text = displayText(stack)
-
-      const cellX = boxLayout.x + col * (cellW + colGap)
-      const cellY = boxLayout.y + row * (cellH + rowGap)
-      const cx = cellX + cellW / 2
-      const cy = cellY + cellH / 2
-
-      const baseSize = isHeadline ? Math.round(readerFontSize * 0.7) : readerFontSize
-      const textMaxW = isHeadline ? headlineTextMaxWidth(maxTextW) : maxTextW
-      const textMaxH = Math.max(8, cellH - 2 * SLOT_PAD_Y)
-      const { size, box } = fitFontSize(ctx, text, family, baseSize, textMaxW, textMaxH)
-      const baseline = baselineForCenteredText(
-        cy,
-        box,
-        Math.max(STAGE_PAD_Y + SLOT_PAD_Y, cellY + SLOT_PAD_Y),
-        Math.min(height - STAGE_PAD_Y - SLOT_PAD_Y, cellY + cellH - SLOT_PAD_Y)
-      )
-      const textCenterY = textCenterFromBaseline(baseline, box)
-      const textW = box.width
-      const hasText = stack.words.length > 0
-      const isActive = config.highlightActive && hasText && isSlotHighlighted(row, col) && !isHeadline
-
-      if (isActive) {
-        const pad = Math.round(size * 0.25)
-        ctx.fillStyle = hColor
-        ctx.fillRect(
-          Math.round(cx - textW / 2 - pad),
-          Math.round(baseline - box.ascent - pad),
-          Math.round(textW + 2 * pad),
-          Math.round(box.ascent + box.descent + 2 * pad)
-        )
-      }
-
-      if (isHeadline) {
-        // Decorative rules for headline cells in the grid
-        const gap = HEADLINE_RULE_GAP
-        const ruleY = Math.round(textCenterY - HEADLINE_RULE_H / 2)
-        ctx.save()
-        ctx.globalAlpha = HEADLINE_RULE_OPACITY
-        ctx.fillStyle = accentColor
-        ctx.fillRect(Math.round(cx - textW / 2 - gap - HEADLINE_RULE_W), ruleY, HEADLINE_RULE_W, HEADLINE_RULE_H)
-        ctx.fillRect(Math.round(cx + textW / 2 + gap), ruleY, HEADLINE_RULE_W, HEADLINE_RULE_H)
-        ctx.restore()
-        ctx.fillStyle = isActive ? hTextColor : accentColor
-      } else {
-        ctx.fillStyle = isActive ? hTextColor : fg
-      }
-
-      ctx.textAlign = 'center'
-      ctx.textBaseline = 'alphabetic'
-      ctx.fillText(text, cx, baseline)
-
-      // Column divider to the right of this cell.
-      if (col < cols - 1 && config.showChunkDividers) {
-        const divX = Math.round(cellX + cellW + colGap / 2)
-        ctx.strokeStyle = fg + '55' // semi-transparent
-        ctx.lineWidth = 1
-        ctx.beginPath()
-        ctx.moveTo(divX, cellY)
-        ctx.lineTo(divX, cellY + cellH)
-        ctx.stroke()
-      }
-    }
+  if (divider.kind === 'dot') {
+    ctx.fillStyle = colors.fg
+    ctx.beginPath()
+    ctx.arc(gap.x + gap.width / 2, gap.y + gap.height / 2, DIVIDER_DOT_SIZE / 2, 0, Math.PI * 2)
+    ctx.fill()
+    return
   }
+
+  if (divider.active && leftHighlight && rightHighlight) {
+    const from = leftHighlight.x + leftHighlight.width
+    const top = Math.min(leftHighlight.y, rightHighlight.y)
+    const bottom = Math.max(
+      leftHighlight.y + leftHighlight.height,
+      rightHighlight.y + rightHighlight.height
+    )
+    ctx.fillStyle = colors.highlight
+    ctx.fillRect(Math.round(from), Math.round(top), Math.round(rightHighlight.x - from), Math.round(bottom - top))
+    return
+  }
+
+  const lineX = Math.round(gap.x + gap.width / 2)
+  ctx.strokeStyle = colors.fg + DIVIDER_LINE_ALPHA_HEX
+  ctx.lineWidth = 1
+  ctx.beginPath()
+  ctx.moveTo(lineX, gap.y)
+  ctx.lineTo(lineX, gap.y + gap.height)
+  ctx.stroke()
 }
 
 function _drawProgressOverlay(
@@ -774,7 +665,7 @@ export async function renderVideo(
   for (const segment of nonEmpty) {
     const { stacks, config } = segment
     const beatMs = 60_000 / config.bpm
-    const { blockSize } = gridShape(config)
+    const blockSize = frameBatchSize(config)
 
     // A fresh canvas per segment prevents the GPU-backed texture from becoming
     // invalid between segments: closing a bitmap from the previous segment can
@@ -786,7 +677,10 @@ export async function renderVideo(
       closeEncoder()
       throw new Error('Could not get 2D context from OffscreenCanvas')
     }
-    const layoutMeasureWidth = createContextMeasureWidth(ctx)
+    const measureWidth = createContextMeasureWidth(ctx)
+    // Sticky reveal is frame state threaded through the sequence, exactly as the
+    // live reader carries it — a segment starts from rest.
+    let reveal: RevealState = INITIAL_REVEAL_STATE
 
     for (let i = 0; i < stacks.length; i++) {
       if (signal?.aborted) {
@@ -798,12 +692,17 @@ export async function renderVideo(
         throw encoderError
       }
 
-      const configuredFrame = buildReaderLikeFrame(stacks, i, config)
-      const configuredLayout = resolveVideoReaderLayout(ctx, configuredFrame.displayStacks, config, width, height, layoutMeasureWidth)
-      const configuredRows = gridShape(config).rows
-      const frame = configuredLayout.rows === configuredRows
-        ? configuredFrame
-        : buildReaderLikeFrame(stacks, i, config, configuredLayout.rows)
+      const videoFrame = buildVideoFrame({
+        ctx,
+        stacks,
+        currentIndex: i,
+        config,
+        width,
+        height,
+        reveal,
+        measureWidth,
+      })
+      reveal = videoFrame.frame.reveal
 
       const duration = pauseMs(stacks[i].type, beatMs, {
         pauseAtSentences: config.pauseAtSentences,
@@ -814,14 +713,9 @@ export async function renderVideo(
 
       drawFrame(
         ctx,
-        frame.displayStacks,
+        videoFrame,
         config,
-        width,
-        height,
-        config.showProgressOverlay ? processedStacks / totalStacks : undefined,
-        frame,
-        configuredLayout,
-        layoutMeasureWidth
+        config.showProgressOverlay ? processedStacks / totalStacks : undefined
       )
 
       // Backpressure: let the encoder drain before submitting more frames.

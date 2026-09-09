@@ -1,0 +1,8 @@
+WingletReader portable-mode marker (ADR-0016).
+
+While this file sits beside the WingletReader executable, the app runs in
+portable mode: its entire data directory is redirected to the "data" folder
+beside the executable instead of C:\Users\<you>\AppData, so the library,
+settings, and segments live on the stick and follow you between machines.
+
+Delete this file to make this copy behave like a normal installed app.

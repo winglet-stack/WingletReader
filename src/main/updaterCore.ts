@@ -1,8 +1,12 @@
+export interface UpdateCheckResultLike {
+  downloadPromise?: Promise<unknown> | null
+}
+
 export interface AutoUpdaterLike {
   autoDownload: boolean
   autoInstallOnAppQuit: boolean
   allowPrerelease: boolean
-  checkForUpdates(): Promise<unknown>
+  checkForUpdates(): Promise<UpdateCheckResultLike | null>
 }
 
 export interface UpdaterLogger {
@@ -18,7 +22,15 @@ export interface StartupUpdateCheckOptions {
    * slice 01's `isPortable` helper — no detection is duplicated here.
    */
   portable: boolean
-  updater: AutoUpdaterLike
+  /**
+   * The updater, resolved **lazily**. electron-updater exports `autoUpdater` as
+   * a getter that instantiates the platform updater on first read, and reading
+   * it in an unpackaged (dev) run crashes startup — which is why the caller used
+   * to repeat the packaged/portable guards before dereferencing it. Taking a
+   * thunk instead lets those guards live here, once: nothing touches the getter
+   * until both have passed, and both run synchronously before the first `await`.
+   */
+  resolveUpdater: () => AutoUpdaterLike
   logger?: UpdaterLogger
 }
 
@@ -29,7 +41,7 @@ export interface StartupUpdateCheckResult {
 export async function runStartupUpdateCheck({
   isPackaged,
   portable,
-  updater,
+  resolveUpdater,
   logger = console
 }: StartupUpdateCheckOptions): Promise<StartupUpdateCheckResult> {
   if (!isPackaged) {
@@ -42,6 +54,7 @@ export async function runStartupUpdateCheck({
     return { checked: false }
   }
 
+  const updater = resolveUpdater()
   updater.autoDownload = true
   updater.autoInstallOnAppQuit = true
   // Alpha builds carry a semver prerelease tag (`0.1.0-alpha.N`). GitHub's
@@ -51,7 +64,13 @@ export async function runStartupUpdateCheck({
 
   try {
     logger.info('Checking for updates against the packaged feed.')
-    await updater.checkForUpdates()
+    const result = await updater.checkForUpdates()
+    // electron-updater starts the download detached when autoDownload is on and
+    // hands the promise back for the caller to own. Do not await it: startup
+    // must not block on the background download.
+    result?.downloadPromise?.catch((error) => {
+      logger.warn('Background update download failed; continuing.', error)
+    })
     return { checked: true }
   } catch (error) {
     logger.warn('Auto-update check failed; continuing startup.', error)

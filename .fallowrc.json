@@ -11,8 +11,34 @@
   ],
   // Archived (dead-by-design) code must not tax the health score or dead-code
   // reachability. Excluded globally per the codebase-sanitation exceptions policy.
+  // Lives at the repo root (not under src/) since the ADR-0004 amendment, which
+  // is also what keeps it out of the tsconfig/vitest globs.
   "ignorePatterns": [
-    "**/_archived/**"
+    "archive/**",
+    // The motion-graphics worktree (orphan `promo` branch) is a separate project
+    // with its own package.json, entry point and node_modules. It is not reachable
+    // from any entry above, so fallow would score the whole of it as dead code and
+    // misreport its deps as unused. Not part of this codebase; not fallow's to audit.
+    "promo/**"
+  ],
+  // `SettingsMode` is intentionally two unrelated types with the same name: the
+  // entry-path union in NavigationContext.tsx (`global | transmute`) and the
+  // store-scope union in shared/settings.ts (`global | reader | rww`). This is
+  // documented in CONTEXT.md ("SettingsMode is two different types"); silence the
+  // duplicate-export grouping so the noise does not mask real duplicates.
+  "ignoreExports": [
+    { "file": "src/renderer/src/contexts/NavigationContext.tsx", "exports": ["SettingsMode"] },
+    { "file": "src/shared/settings.ts", "exports": ["SettingsMode"] },
+    // `SessionBaseline` is intentionally two unrelated types with the same
+    // name (release-0.2.1-alpha-1 issue 03): the ADR-0026 reading-position
+    // baseline (`{ stackIndex, source }`, engine/readerSession.ts, consumed by
+    // useReadingSession.ts/SessionDialog's position-revert path) and the
+    // ADR-0035/0036 stats-comparison baseline (`SessionMetrics`-shaped,
+    // shared/statsMath.ts, consumed by useSessionStatsSummary.ts and
+    // SessionDialog.tsx's stats block). Same SettingsMode-style collision;
+    // silence the duplicate-export grouping rather than renaming either.
+    { "file": "src/renderer/src/engine/readerSession.ts", "exports": ["SessionBaseline"] },
+    { "file": "src/shared/statsMath.ts", "exports": ["SessionBaseline"] }
   ],
   "duplicates": {
     // Hide pair-only clones; focus on widespread copy-paste
@@ -23,6 +49,21 @@
     "ignore": [
       "**/__tests__/**"
     ]
+  },
+  "health": {
+    // Post-codebase-health targets peak at cognitive 13 and cyclomatic 5;
+    // none has a CRAP finding. Keep Fallow's standard ceilings as the honest
+    // regression floor rather than tightening them beyond what the tree uses.
+    "maxCyclomatic": 20,
+    "maxCognitive": 15,
+    "maxCrap": 30.0
+  },
+  "audit": {
+    // Gate only findings introduced by the candidate commit. Existing debt is
+    // visible in health reports but must not force routine hook bypasses. The
+    // final identity baseline makes regressions in refactored functions new again.
+    "gate": "new-only",
+    "healthBaseline": ".fallow/health-baseline.json"
   },
   "rules": {
     "unused-dependencies": "warn"

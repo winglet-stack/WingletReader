@@ -1,14 +1,13 @@
-import { buildParagraphWordCounts } from './wordHighlight'
-
 /**
  * Paged Text view pagination engine (ADR-0025, Library Facelift run 3).
  *
  * Pure arithmetic over a text's word sequence: it turns whole-text word offsets
- * into fixed-ish **Page** boundaries and looks them up. Word indexing is shared
- * with `buildWordPositions` (via `buildParagraphWordCounts`), so Page indices
- * align with the `wordOffset` space used by stacks, `plainTextCtx.wordOffset`,
- * and bookmark anchors. No React, no measurement — boundaries are computed once
- * when a text is engaged and cached by the caller.
+ * into fixed-ish **Page** boundaries and looks them up. It never walks the text
+ * itself — it takes the paragraph word counts `scanText` produced, so Page
+ * indices are in the same `wordOffset` space as stacks and bookmark anchors by
+ * construction. No React, no measurement; the **word index**
+ * (`engine/wordIndex.ts`) is what caches these boundaries per engaged text and
+ * exposes the lookups to consumers.
  */
 
 /** Target words per Page. Whole paragraphs accumulate until this is reached. */
@@ -29,31 +28,20 @@ export interface PageOptions {
 }
 
 /**
- * Ascending word offsets of Page start indices for `displayContent`. Always
- * begins with `0`, and every entry is a whole-text word index into the same
- * space as `buildWordPositions`.
+ * Ascending word offsets of Page start indices, from the paragraph word counts
+ * `scanText` produced. Always begins with `0`, and every entry is a whole-text
+ * word index in the anchored `wordOffset` space.
  *
  * Boundaries are paragraph-aware: whole paragraphs accumulate onto the current
  * Page until adding the next one would exceed `targetWords`, then the Page
  * breaks at the paragraph end — a paragraph is never split mid-sentence.
  * Runaway guard: a single paragraph longer than `hardCap` (and, equivalently, a
  * text with no paragraph breaks) is hard-cut into `hardCap`-sized slices. One
- * O(n) pass over the paragraph word counts.
+ * O(n) pass over the counts, and no walk of the text — the caller already did
+ * exactly one (OL-1).
  *
  * A text shorter than one Page — including empty / word-less content — yields
  * `[0]` (a single Page).
- */
-export function computePageStarts(displayContent: string, options?: PageOptions): number[] {
-  return computePageStartsFromCounts(buildParagraphWordCounts(displayContent), options)
-}
-
-/**
- * Page starts from an already-computed paragraph-word-count array — the pure
- * arithmetic core of `computePageStarts`, split out so a caller that already
- * tokenized the book (via `scanText`) does not walk it a second time (OL-1).
- * `paragraphWordCounts` must be the counts `buildParagraphWordCounts` /
- * `scanText` produce. Empty counts yield `[0]` (a single Page). See
- * `computePageStarts` for the boundary rules.
  */
 export function computePageStartsFromCounts(
   paragraphWordCounts: number[],

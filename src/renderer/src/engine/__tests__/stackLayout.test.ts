@@ -140,7 +140,7 @@ describe('nextRevealState', () => {
 describe('buildDisplayRows', () => {
   it('builds a single row with all slots revealed', () => {
     const s = makeStacks(3)
-    const rows = buildDisplayRows(s, 0, 0, 3, 2)
+    const rows = buildDisplayRows(s, 0, 0, 3, 2, 1)
     expect(rows).toHaveLength(1)
     expect(rows[0]).toHaveLength(3)
     expect(rows[0][0]).toEqual(s[0])
@@ -150,7 +150,7 @@ describe('buildDisplayRows', () => {
 
   it('hides slots beyond revealUpToSlot in the current row', () => {
     const s = makeStacks(3)
-    const rows = buildDisplayRows(s, 0, 0, 3, 1)
+    const rows = buildDisplayRows(s, 0, 0, 3, 1, 1)
     expect(rows[0][0]).toEqual(s[0])
     expect(rows[0][1]).toEqual(s[1])
     expect(rows[0][2]).toBeNull()
@@ -158,7 +158,7 @@ describe('buildDisplayRows', () => {
 
   it('hides all slots except the first when revealUpToSlot is 0', () => {
     const s = makeStacks(3)
-    const rows = buildDisplayRows(s, 0, 0, 3, 0)
+    const rows = buildDisplayRows(s, 0, 0, 3, 0, 1)
     expect(rows[0][0]).toEqual(s[0])
     expect(rows[0][1]).toBeNull()
     expect(rows[0][2]).toBeNull()
@@ -167,7 +167,7 @@ describe('buildDisplayRows', () => {
   it('shows all slots in past rows regardless of revealUpToSlot', () => {
     // 6 stacks: 2 rows × 3 slots; currently on line 1 with revealUpToSlot=0
     const s = makeStacks(6)
-    const rows = buildDisplayRows(s, 0, 1, 3, 0)
+    const rows = buildDisplayRows(s, 0, 1, 3, 0, 2)
     expect(rows).toHaveLength(2)
     // Past row 0: all slots visible
     expect(rows[0][0]).toEqual(s[0])
@@ -181,7 +181,7 @@ describe('buildDisplayRows', () => {
 
   it('returns null for out-of-bounds stack positions', () => {
     const s = makeStacks(2)
-    const rows = buildDisplayRows(s, 0, 0, 3, 2)
+    const rows = buildDisplayRows(s, 0, 0, 3, 2, 1)
     expect(rows[0][0]).toEqual(s[0])
     expect(rows[0][1]).toEqual(s[1])
     expect(rows[0][2]).toBeNull()
@@ -190,13 +190,23 @@ describe('buildDisplayRows', () => {
   it('applies blockStart to access the correct stacks', () => {
     const s = makeStacks(9)
     // blockStart=3, 2 rows of 3 stacks, current row=1 (all revealed)
-    const rows = buildDisplayRows(s, 3, 1, 3, 2)
+    const rows = buildDisplayRows(s, 3, 1, 3, 2, 2)
     expect(rows[0][0]).toEqual(s[3])
     expect(rows[0][1]).toEqual(s[4])
     expect(rows[0][2]).toEqual(s[5])
     expect(rows[1][0]).toEqual(s[6])
     expect(rows[1][1]).toEqual(s[7])
     expect(rows[1][2]).toEqual(s[8])
+  })
+
+  it('always builds linesCount rows and leaves future rows empty', () => {
+    const s = makeStacks(9)
+    const rows = buildDisplayRows(s, 0, 0, 3, 0, 3)
+
+    expect(rows).toHaveLength(3)
+    expect(rows[0]).toEqual([s[0], null, null])
+    expect(rows[1]).toEqual([null, null, null])
+    expect(rows[2]).toEqual([null, null, null])
   })
 })
 

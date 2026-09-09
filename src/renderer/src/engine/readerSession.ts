@@ -1,10 +1,16 @@
 /**
- * Pure session-lifecycle decisions extracted from Reader.tsx (RS-1…RS-4).
- * Decisions only — orchestration (setState, refs, timers, stop(), DB writes)
- * stays inline in the component.
+ * Pure **reading session** decisions (ADR-0026).
+ *
+ * This half answers questions; `hooks/useReadingSession.ts` is the module that
+ * sequences them and owns the orchestration (playback timer, refs, DB writes).
+ * Until `architecture-depth/11` that orchestration lived inline in `Reader.tsx`,
+ * which is why this file used to say "decisions only — orchestration stays in
+ * the component". It no longer does: everything a decision here governs is
+ * applied behind the session interface, and every rule the session enforces is
+ * stated here rather than as an inline condition in an effect.
  */
 
-import type { PlaybackState, WordStack } from '../types'
+import type { PlaybackState } from '../types'
 
 type ReadingPositionSource = 'text' | 'segment'
 
@@ -12,6 +18,27 @@ export interface SessionBaseline {
   stackIndex: number
   source: ReadingPositionSource
 }
+
+/** Why a reading session ended — the Session dialog's three variants (ADR-0026 §5). */
+export type SessionEndReason = 'stop' | 'goal' | 'end'
+
+/**
+ * **Host configuration**: which completion path a finished reading run takes in
+ * this host. It is not a feature switch and not a capability flag — it names the
+ * one thing it selects, and the session module is the only module that reads it.
+ *
+ * - `session-dialog` — the standard Reader (ADR-0026 §4/§5): Stop, a Target
+ *   crossing and the natural end all **pause and hold** the position and raise a
+ *   session end for the guided dialog.
+ * - `host-completion` — the Overlay Reader (ADR-0026 consequences): the same
+ *   three arrivals **stop** playback and the host owns the follow-up, so no
+ *   session end is ever raised and the natural end is terminal.
+ *
+ * It replaces the former `sessionEndEnabled` boolean, which fanned out to four
+ * consumption points and changed playback termination, dialog mounting and Stop
+ * semantics at once (`architecture-depth/11`).
+ */
+export type SessionCompletion = 'session-dialog' | 'host-completion'
 
 /** One resume-countdown tick: 3 → 2 → 1 → 0. null (inactive) stays null. */
 export function nextCountdownTick(countdown: number | null): number | null {
@@ -46,6 +73,62 @@ export function shouldStartReadingSession(prev: PlaybackState, next: PlaybackSta
 }
 
 /**
+ * Baseline-capture rule (ADR-0026 §2, with its one documented exception).
+ *
+ * §2: a session begins on the rest → playing transition, and pause/resume
+ * *inside* a session never moves the baseline.
+ *
+ * The exception: once a session end is showing (§4 pauses and holds instead of
+ * stopping), the session is over even though playback state says `paused`. So
+ * playing again from that held position is a **new** session and must re-capture
+ * the baseline — otherwise "Exit without saving" from the second run would
+ * revert to the first run's start. This lived as an inline `&&` in the effect
+ * until `architecture-depth/11`; it belongs here, with the rule it qualifies.
+ */
+export function shouldCaptureSessionBaseline(
+  prev: PlaybackState,
+  next: PlaybackState,
+  sessionEndShowing: boolean
+): boolean {
+  if (shouldStartReadingSession(prev, next)) return true
+  return sessionEndShowing && prev === 'paused' && next === 'playing'
+}
+
+/**
+ * Whether this session persists anything at all.
+ *
+ * A text with **no id** is not in the store: the Overlay Reader host fabricates
+ * its `TextRecord` from a temporary session, so every reading position, baseline
+ * commit and revert for it is a no-op. That was an implicit consequence of an
+ * early return in the save helper; `architecture-depth/11` made it a named rule
+ * so the contract is legible and testable rather than inferred.
+ */
+export function sessionPersists(textId: number | undefined): boolean {
+  return Boolean(textId)
+}
+
+/**
+ * Whether a finished session's measured record is written to the store at all
+ * (ADR-0035 §1/§2). Three gates, stated once:
+ *
+ * - Only the guided-completion host measures — `host-completion` (the Overlay
+ *   Reader) never raises a session end and never records.
+ * - Only a text that exists in the store can be attributed — the same no-id
+ *   contract as {@link sessionPersists}, since the Overlay Reader fabricates
+ *   its `TextRecord` without one.
+ * - A session that advanced zero words records nothing.
+ */
+export function shouldRecordSessionStats(
+  completion: SessionCompletion,
+  textId: number | undefined,
+  wordsRead: number
+): boolean {
+  if (completion !== 'session-dialog') return false
+  if (!sessionPersists(textId)) return false
+  return wordsRead > 0
+}
+
+/**
  * Captures the saved reading position as the session baseline. Missing saves
  * mean the reader's deliberate save point is the start of the text.
  */
@@ -72,6 +155,20 @@ export function shouldFireOnce(
   if (targetIndex == null || targetIndex <= 0) return false
   if (currentIndex < targetIndex) return false
   return !alreadyFired
+}
+
+/**
+ * Whether a stack index change can be a **crossing** at all.
+ *
+ * Only playback crosses. Every other index change — a scrub, a bookmark jump, a
+ * re-tokenization landing the playhead somewhere new — is a move, and a move
+ * never consumes a Target (ADR-0024). This was the one rule of the crossing
+ * detector left as a bare `playState !== 'playing'` guard in the effect
+ * (`architecture-depth/01`'s finding, restated by 11); it is stated here now,
+ * beside the predicate it fronts.
+ */
+export function playbackCanCross(playState: PlaybackState): boolean {
+  return playState === 'playing'
 }
 
 /**
@@ -116,46 +213,15 @@ export function shouldFireComplete(prev: PlaybackState, next: PlaybackState): bo
   return next === 'stopped' && prev !== 'idle'
 }
 
-/** Cumulative word count of the stacks before the given stack index. */
-export function wordOffsetAtIndex(stacks: WordStack[], index: number): number {
-  return stacks.slice(0, index).reduce((sum, s) => sum + s.words.length, 0)
-}
-
-/**
- * Resolves a durable bookmark word offset to the live stack index used by the
- * current tokenization. Returns the first stack boundary at or after the offset.
+/*
+ * Word-offset ⇄ stack-index conversion used to live here as three functions
+ * that each re-walked the tokenization — and `wordOffsetAtIndex` allocated a
+ * fresh prefix copy of the stack array on every call, from a render path.
+ * `architecture-depth/08` moved them onto the **word index**
+ * (`engine/wordIndex.ts`), which prefix-sums the tokenization once and answers
+ * in O(1) / O(log n): `offsetAtStack`, `stackAtOffset`, `restoreStackAtOffset`.
+ * Their behaviour is unchanged and pinned by `__tests__/wordIndex.test.ts`.
  */
-export function resolveWordsToStackIndex(wordOffset: number, stacks: WordStack[]): number {
-  if (wordOffset <= 0) return 0
-
-  let cumWords = 0
-  for (let i = 0; i < stacks.length; i++) {
-    cumWords += stacks[i].words.length
-    if (cumWords >= wordOffset) return i + 1
-  }
-  return stacks.length
-}
-
-/**
- * After a words-per-stack change re-tokenizes the text (resetting playback to
- * stack 0), find the stack index in the fresh tokenization closest to a saved
- * word offset: the first stack whose starting word offset is >= the saved
- * offset, clamped to the last stack when the offset lies past the end.
- */
-export function resolveRestoreIndex(offset: number, stacks: WordStack[]): number {
-  if (stacks.length === 0) return 0
-  let cumWords = 0
-  let targetIdx = 0
-  for (let i = 0; i < stacks.length; i++) {
-    if (cumWords >= offset) {
-      targetIdx = i
-      break
-    }
-    cumWords += stacks[i].words.length
-    targetIdx = i + 1
-  }
-  return Math.min(targetIdx, stacks.length - 1)
-}
 
 /**
  * Percent label for the resume-from-saved control.

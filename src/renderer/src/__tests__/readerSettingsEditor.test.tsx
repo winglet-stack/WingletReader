@@ -56,6 +56,12 @@ describe('readerSettingsLayout descriptor', () => {
     expect(playback.sections[0].fields).toContain('metronome_enabled')
     expect(grid.sections[0].fields).toContain('words_per_stack')
     expect(playback.sections[0].fields).not.toContain('words_per_stack')
+    expect(grid.sections[0].fields).toEqual([
+      'words_per_stack',
+      'stacks_visible',
+      'lines_count',
+      'lines_anchor',
+    ])
   })
 
   it('relocates Palette, panning size, and the Spacing sliders to their new homes', () => {
@@ -88,6 +94,25 @@ describe('readerSettingsLayout descriptor', () => {
 })
 
 describe('ReaderSettingsEditor — Settings host', () => {
+  it('shows an always-visible Line count and reveals the generic Anchor control above one line', () => {
+    const onSave = vi.fn()
+    render(
+      <ReaderSettingsEditor
+        settings={{ ...DEFAULT_SETTINGS, lines_count: 1, lines_anchor: 'top' }}
+        onSave={onSave}
+      />
+    )
+
+    expect(screen.queryByText('Multiple lines')).toBeNull()
+    const count = screen.getByRole('spinbutton', { name: 'Line count value' }) as HTMLInputElement
+    expect(count.value).toBe('1')
+    expect(screen.queryByRole('group', { name: 'Anchor' })).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Increase Line count' }))
+    expect(screen.getByRole('group', { name: 'Anchor' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Top-anchored' }).getAttribute('aria-pressed')).toBe('true')
+  })
+
   it('lands directly on the two-tab layout — no card grid, no "Edit everything"', () => {
     render(<ReaderSettingsEditor settings={DEFAULT_SETTINGS} onSave={vi.fn()} />)
     expect(screen.getByRole('tab', { name: 'Playback & Grid Layout' })).toBeTruthy()
@@ -231,7 +256,6 @@ describe('ReaderSettingsEditor — Settings host', () => {
           font_size: 72,
           words_per_stack: 8,
           stacks_visible: 6,
-          lines_enabled: true,
           lines_count: 6,
         }}
         onSave={vi.fn()}

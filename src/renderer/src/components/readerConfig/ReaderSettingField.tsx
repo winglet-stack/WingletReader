@@ -12,6 +12,7 @@ import AdvanceKeyRow from './AdvanceKeyRow'
 import LiveRewindKeyRow from './LiveRewindKeyRow'
 import PaletteSelector from '../PaletteSelector'
 import { PRESET_PALETTES, validatePalettes } from '../../engine/palettes'
+import { effectiveLinesCount, linesCountPatch } from '../../../../shared/settings'
 
 interface Props {
   field: string
@@ -138,8 +139,7 @@ const FIELD_HINTS: Record<string, string> = {
   pause_at_sentences: 'Add a beat pause at sentence-ending stacks',
   pause_at_headlines: 'Add extra pause when reading headline stacks',
   words_per_stack: 'Words shown at once in each slot',
-  lines_enabled: 'Stack multiple rows of word groups before redrawing',
-  lines_count: 'Rows of word stacks displayed before redrawing',
+  lines_count: 'Rows of word stacks displayed before redrawing; 1 is single-line',
   font_size: 'Size of words shown in the reader',
   highlight_active: 'Color the active word stack so it stands out',
   text_color: 'Color of the words displayed in the reader',
@@ -149,7 +149,7 @@ const FIELD_HINTS: Record<string, string> = {
 
 /** Conditional/nested rows carry the calm grid's inset treatment. */
 const INDENTED_FIELDS = new Set([
-  'lines_count',
+  'lines_anchor',
   'highlight_panning_chunk_size',
   'highlight_color',
   'highlight_text_color',
@@ -168,8 +168,16 @@ function GenericField({
   const hint = FIELD_HINTS[field] ?? meta.explain
   const indented = INDENTED_FIELDS.has(field)
   const disabled = meta.disabledWhen ? meta.disabledWhen(local) : false
-  const rawValue = local[field as keyof Settings]
-  const set = (v: unknown) => update({ [field]: v } as unknown as Partial<Settings>)
+  const rawValue = field === 'lines_count'
+    ? effectiveLinesCount(local)
+    : local[field as keyof Settings]
+  const set = (v: unknown) => {
+    if (field === 'lines_count') {
+      update(linesCountPatch(Number(v)))
+      return
+    }
+    update({ [field]: v } as unknown as Partial<Settings>)
+  }
 
   switch (meta.instrument) {
     case 'Toggle':
@@ -213,6 +221,19 @@ function GenericField({
             clampValue={meta.clampValue}
             disabled={disabled}
             onLiveSet={set}
+          />
+        </LabelledRow>
+      )
+
+    case 'Segmented':
+      return (
+        <LabelledRow label={meta.label} hint={hint} indented={indented}>
+          <Segmented
+            label={meta.label}
+            value={(rawValue ?? meta.defaultValue) as string | boolean}
+            options={meta.options!}
+            disabled={disabled}
+            onChange={set}
           />
         </LabelledRow>
       )

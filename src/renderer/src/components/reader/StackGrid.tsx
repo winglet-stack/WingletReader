@@ -1,74 +1,52 @@
 import React from 'react'
 import StackDisplay from '../StackDisplay'
-import { deriveSlotPresentation } from '../../engine/stackLayout'
-import type { WordStack } from '../../types'
+import type { ReaderFrame } from '../../engine/readerFrame'
 
-interface Props {
-  displayRows: (WordStack | null)[][]
-  gridTemplateColumns: string
-  blockStart: number
-  stacksVisible: number
-  highlightActive: boolean
-  focalPointsView: boolean
-  showChunkDividers: boolean
-  isSlotHighlighted: (rowIdx: number, colIdx: number) => boolean
-  fontSize: number
-  verticalOffset: number
-  horizontalOffset: number
-  rowGap: number
-}
+/**
+ * DOM painter for the reader frame.
+ *
+ * Maps the frame description to elements and CSS variables. It makes no geometric
+ * decision of its own — every class, size, gap and divider state is read from the
+ * frame (see `engine/readerFrame.ts`).
+ */
+export default function StackGrid({ frame }: { frame: ReaderFrame }) {
+  const { geometry } = frame
 
-export default function StackGrid({
-  displayRows,
-  gridTemplateColumns,
-  blockStart,
-  stacksVisible,
-  highlightActive,
-  focalPointsView,
-  showChunkDividers,
-  isSlotHighlighted,
-  fontSize,
-  verticalOffset,
-  horizontalOffset,
-  rowGap,
-}: Props) {
   return (
     <div
-      className="reader-stack-rows"
+      className={`reader-stack-rows reader-stack-rows--${geometry.anchor}`}
       style={{
-        transform: `translateY(${verticalOffset}px) translateX(${horizontalOffset}px)`,
-        gap: `${rowGap}px`,
+        transform: `translateY(${geometry.verticalOffset}px) translateX(${geometry.horizontalOffset}px)`,
+        gap: `${geometry.rowGap}px`,
       } as React.CSSProperties}
     >
-      {displayRows.map((slots, rowIdx) => (
-        <div key={rowIdx} className="reader-stack-row" style={{ gridTemplateColumns }}>
-          {slots.map((stack, colIdx) => {
-            const slot = deriveSlotPresentation({
-              rowIdx, colIdx, stack, stacksVisible, blockStart,
-              highlightActive, focalPointsView, showChunkDividers, isSlotHighlighted,
-            })
-            return (
-              <React.Fragment key={colIdx}>
-                {slot.divider && (
-                  <div
-                    className={`stack-divider${slot.divider.kind === 'dot' ? ' stack-divider--dot' : ''}${slot.divider.active ? ' stack-divider--active' : ''}`}
-                    aria-hidden="true"
-                    style={{ visibility: slot.divider.visible ? 'visible' : 'hidden' }}
+      {frame.rows.map((row) => (
+        <div
+          key={row.rowIndex}
+          className="reader-stack-row"
+          style={{ gridTemplateColumns: geometry.gridTemplateColumns, minHeight: geometry.rowHeight }}
+        >
+          {row.slots.map((slot) => (
+            <React.Fragment key={slot.colIndex}>
+              {slot.divider && (
+                <div
+                  className={`stack-divider${slot.divider.kind === 'dot' ? ' stack-divider--dot' : ''}${slot.divider.active ? ' stack-divider--active' : ''}`}
+                  aria-hidden="true"
+                  style={{ visibility: slot.divider.visible ? 'visible' : 'hidden' }}
+                />
+              )}
+              <div className={slot.slotClass}>
+                {slot.stack !== null && (
+                  <StackDisplay
+                    key={slot.stackIndex}
+                    stack={slot.stack}
+                    fontSize={slot.fontSize}
+                    isHeadline={slot.isHeadline}
                   />
                 )}
-                <div className={slot.slotClass}>
-                  {stack !== null && (
-                    <StackDisplay
-                      key={slot.globalIdx}
-                      stack={stack}
-                      fontSize={fontSize}
-                      isHeadline={stack.type === 'headline'}
-                    />
-                  )}
-                </div>
-              </React.Fragment>
-            )
-          })}
+              </div>
+            </React.Fragment>
+          ))}
         </div>
       ))}
     </div>

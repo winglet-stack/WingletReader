@@ -5,34 +5,15 @@ import {
   PORTABLE_MARKER_FILENAME
 } from './portableMode'
 
-export type PortableProvisioningErrorCode =
-  | 'invalid-target'
-  | 'target-not-writable'
-  | 'insufficient-space'
-  | 'portable-exists'
-  | 'target-has-conflicts'
-  | 'source-missing'
-  | 'copy-failed'
-
-export interface PortableProvisioningError {
-  code: PortableProvisioningErrorCode
-  message: string
-  detail?: string
-  requiredBytes?: number
-  availableBytes?: number
-}
-
-export type PortableProvisioningResult =
-  | {
-      ok: true
-      targetPath: string
-      launcherPath: string
-      dataPath: string
-    }
-  | {
-      ok: false
-      error: PortableProvisioningError
-    }
+import type {
+  PortableProvisioningErrorCode,
+  PortableProvisioningResult
+} from '../shared/channelContract'
+export type {
+  PortableProvisioningError,
+  PortableProvisioningErrorCode,
+  PortableProvisioningResult
+} from '../shared/channelContract'
 
 const PRODUCT_EXE_FILENAME = 'WingletReader.exe'
 const ROOT_LAUNCHER_FILENAME = 'WingletReader.cmd'

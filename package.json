@@ -1,6 +1,6 @@
 {
   "name": "wingletreader",
-  "version": "0.2.0-alpha.1",
+  "version": "0.2.1-alpha.1",
   "description": "Local-first speed-reading application",
   "main": "./out/main/index.js",
   "engines": {
@@ -77,8 +77,10 @@
     "vitest": "^1.6.1"
   },
   "dependencies": {
+    "@xmldom/xmldom": "^0.8.13",
     "electron-log": "^5.4.4",
     "electron-updater": "^6.8.9",
+    "jszip": "^3.10.1",
     "mammoth": "^1.7.1",
     "mp4-muxer": "^5.2.2",
     "pdf-parse": "^1.1.1",

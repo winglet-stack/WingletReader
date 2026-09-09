@@ -37,9 +37,16 @@ export type {
   BookResumeTarget,
   CategoryRecord,
   ContentSourceType,
+  DayStatsRecord,
   ReadingPosition,
   ResumeCandidate,
   SegmentSourceType,
+  SessionStatsRecord,
+  StatsCollection,
+  StatsHighscores,
+  StatsOverview,
+  StatsTodaySummary,
+  StatsTotals,
   Summary,
   SummaryQuestion,
   TextRecord,
@@ -60,7 +67,24 @@ import type {
   ReadingPosition,
   ResumeCandidate,
   BookResumeTarget,
+  DayStatsRecord,
+  SessionStatsRecord,
+  StatsCollection,
+  StatsOverview,
 } from '../shared/domainRecords'
+
+import {
+  DAYS_PER_WEEK,
+  deriveStreak,
+  emptyDaySums,
+  fluencyScore,
+  foldSessionsIntoDay,
+  interruptionRate,
+  localDateKey,
+  pointsForDay,
+  weekStartKey
+} from '../shared/statsMath'
+import type { DaySums, SessionSums } from '../shared/statsMath'
 
 interface StoreData {
   nextId: number
@@ -82,14 +106,17 @@ interface StoreData {
    */
   settings: SettingsStore
   /**
-   * Seed loader ledger (ADR-0018). `seededIds` is the permanent record of every
-   * `seedId` ever inserted — dedupe is against this, never against currently
-   * present texts, so a user-deleted seeded book never resurrects.
-   * `seededBundleVersion` is the highest bundle version already applied; a launch
-   * whose bundle is not greater early-outs without scanning.
+   * Dormant ADR-0018 launch-ledger keys, retained without migration so legacy
+   * stores remain parseable and round-trip losslessly (ADR-0033 D1; ADR-0019 §4
+   * pattern). No runtime behavior may read these values again.
    */
   seededIds: string[]
   seededBundleVersion: number
+  /**
+   * Reading activity (ADR-0035 §4). Additive: `normalizeLoadedStore` defaults it
+   * for stores written before it existed, so no schema version is needed.
+   */
+  stats: StatsCollection
 }
 
 interface DatabaseLogger {
@@ -114,14 +141,322 @@ function normalizeCategoryEntry(entry: unknown): { id: number; name: string } | 
   return { id, name }
 }
 
-/** Coerces a persisted seed ledger to a clean string array (ADR-0018). */
+/** Load-compat only for the dormant ADR-0018 `seededIds` store key. */
 function normalizeSeededIds(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((id): id is string => typeof id === 'string') : []
 }
 
-/** Coerces a persisted applied bundle version to a finite number, defaulting to 0. */
+/** Load-compat only for the dormant ADR-0018 `seededBundleVersion` store key. */
 function normalizeSeededBundleVersion(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : 0
+}
+
+function createBuiltInCategories(): CategoryRecord[] {
+  return [
+    { id: UNCATEGORIZED_CATEGORY_ID, name: 'Uncategorized', is_system: true, is_locked: true },
+    { id: READING_CATEGORY_ID, name: 'Reading', is_system: true },
+    { id: ARCHIVE_CATEGORY_ID, name: 'Archive', is_system: true }
+  ]
+}
+
+function normalizeStoredCategory(category: CategoryRecord): CategoryRecord | null {
+  if (!category || typeof category !== 'object') return null
+  const id = Number(category.id)
+  const name = typeof category.name === 'string' ? category.name.trim() : ''
+  if (!Number.isInteger(id) || id <= 0 || !name) return null
+  return {
+    id,
+    name,
+    is_system: category.is_system === true ? true : undefined,
+    is_locked: category.is_locked === true ? true : undefined
+  }
+}
+
+function repairStoredCategories(value: unknown): CategoryRecord[] {
+  const sourceCategories = Array.isArray(value) ? value : []
+  const categoriesById = new Map<number, CategoryRecord>()
+
+  for (const category of sourceCategories) {
+    const normalized = normalizeStoredCategory(category)
+    if (normalized) categoriesById.set(normalized.id, normalized)
+  }
+
+  for (const builtIn of createBuiltInCategories()) {
+    const existing = categoriesById.get(builtIn.id)
+    if (!existing) {
+      categoriesById.set(builtIn.id, builtIn)
+      continue
+    }
+    categoriesById.set(builtIn.id, {
+      ...existing,
+      is_system: true,
+      is_locked: builtIn.id === UNCATEGORIZED_CATEGORY_ID ? true : existing.is_locked
+    })
+  }
+
+  return [...categoriesById.values()].sort((a, b) => a.id - b.id)
+}
+
+function assignValidTextCategories(value: unknown, categories: CategoryRecord[]): TextRecord[] {
+  const sourceTexts = Array.isArray(value) ? value : []
+  const validCategoryIds = new Set(categories.map((category) => category.id))
+  return sourceTexts.map((text) => {
+    const categoryId = Number(text?.category_id)
+    const resolvedCategoryId =
+      Number.isInteger(categoryId) && validCategoryIds.has(categoryId)
+        ? categoryId
+        : UNCATEGORIZED_CATEGORY_ID
+    return { ...text, category_id: resolvedCategoryId }
+  })
+}
+
+function resolveLoadedNextCategoryId(value: unknown, categories: CategoryRecord[]): number {
+  const maxCategoryId = categories.reduce((max, category) => Math.max(max, category.id), 0)
+  const parsedNextCategoryId = Number(value)
+  return Number.isInteger(parsedNextCategoryId) && parsedNextCategoryId > maxCategoryId
+    ? parsedNextCategoryId
+    : maxCategoryId + 1
+}
+
+function nullishOr<T>(value: T | null | undefined, fallback: T): T {
+  return value ?? fallback
+}
+
+function recordArrayOrEmpty<T>(value: unknown): T[] {
+  return Array.isArray(value) ? value : []
+}
+
+// ── Stats helpers (ADR-0035 §4) ─────────────────────────────────────────────
+
+const DATE_KEY_PATTERN = /^\d{4}-\d{2}-\d{2}$/
+
+/** The goal settings a day record is judged against and snapshots. */
+interface StatsGoalSnapshot {
+  quotaTargetWords: number
+  weeklyTargetDays: number
+}
+
+function finiteOrZero(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0
+}
+
+function createEmptyStats(): StatsCollection {
+  return { days: [], sessions: [] }
+}
+
+function normalizeSessionStatsRecord(value: unknown): SessionStatsRecord | null {
+  if (!value || typeof value !== 'object') return null
+  const raw = value as Partial<SessionStatsRecord>
+  const startedAt = finiteOrZero(raw.startedAt)
+  // Without a start instant the record has no day to belong to.
+  if (startedAt <= 0) return null
+  return {
+    textId: Math.trunc(finiteOrZero(raw.textId)),
+    title: typeof raw.title === 'string' ? raw.title : '',
+    startedAt,
+    endedAt: finiteOrZero(raw.endedAt),
+    activeMs: finiteOrZero(raw.activeMs),
+    wordsRead: finiteOrZero(raw.wordsRead),
+    pauses: finiteOrZero(raw.pauses),
+    rewinds: finiteOrZero(raw.rewinds)
+  }
+}
+
+function normalizeDayStatsRecord(value: unknown): DayStatsRecord | null {
+  if (!value || typeof value !== 'object') return null
+  const raw = value as Partial<DayStatsRecord>
+  if (typeof raw.date !== 'string' || !DATE_KEY_PATTERN.test(raw.date)) return null
+  return {
+    date: raw.date,
+    wordsRead: finiteOrZero(raw.wordsRead),
+    wallMs: finiteOrZero(raw.wallMs),
+    activeMs: finiteOrZero(raw.activeMs),
+    pauses: finiteOrZero(raw.pauses),
+    rewinds: finiteOrZero(raw.rewinds),
+    sessionCount: finiteOrZero(raw.sessionCount),
+    longestSessionMs: finiteOrZero(raw.longestSessionMs),
+    bestSessionFluency: finiteOrZero(raw.bestSessionFluency),
+    // A zero target would make an empty day "met"; mirror the settings floor.
+    quotaTargetWords: Math.max(1, finiteOrZero(raw.quotaTargetWords)),
+    weeklyTargetDays: clampWeeklyTargetDays(raw.weeklyTargetDays),
+    quotaMet: raw.quotaMet === true,
+    points: finiteOrZero(raw.points)
+  }
+}
+
+function clampWeeklyTargetDays(value: unknown): number {
+  return Math.min(DAYS_PER_WEEK, Math.max(1, Math.round(finiteOrZero(value))))
+}
+
+function normalizeStats(value: unknown): StatsCollection {
+  if (!value || typeof value !== 'object') return createEmptyStats()
+  const raw = value as Partial<StatsCollection>
+  return {
+    days: recordArrayOrEmpty<unknown>(raw.days)
+      .map(normalizeDayStatsRecord)
+      .filter((day): day is DayStatsRecord => day !== null),
+    sessions: recordArrayOrEmpty<unknown>(raw.sessions)
+      .map(normalizeSessionStatsRecord)
+      .filter((session): session is SessionStatsRecord => session !== null)
+  }
+}
+
+/** Wall duration is derived, never stored — see `SessionStatsRecord`. */
+function sessionSums(session: SessionStatsRecord): SessionSums {
+  return { ...session, wallMs: session.endedAt - session.startedAt }
+}
+
+/** Sums add, maxima max — the same algebra `foldSessionsIntoDay` uses. */
+function mergeDaySums(base: DaySums, added: DaySums): DaySums {
+  return {
+    wordsRead: base.wordsRead + added.wordsRead,
+    wallMs: base.wallMs + added.wallMs,
+    activeMs: base.activeMs + added.activeMs,
+    pauses: base.pauses + added.pauses,
+    rewinds: base.rewinds + added.rewinds,
+    sessionCount: base.sessionCount + added.sessionCount,
+    longestSessionMs: Math.max(base.longestSessionMs, added.longestSessionMs),
+    bestSessionFluency: Math.max(base.bestSessionFluency, added.bestSessionFluency)
+  }
+}
+
+/**
+ * Builds one day record: the sums plus the quota verdict and the points that
+ * verdict earns. `priorDays` is the rest of the history — the draft is appended
+ * last so `deriveStreak` scores this day with the record being written.
+ */
+function buildDayRecord(
+  date: string,
+  sums: DaySums,
+  snapshot: StatsGoalSnapshot,
+  priorDays: readonly DayStatsRecord[]
+): DayStatsRecord {
+  const quotaMet = sums.wordsRead >= snapshot.quotaTargetWords
+  const draft: DayStatsRecord = { date, ...sums, ...snapshot, quotaMet, points: 0 }
+  if (!quotaMet) return draft
+  return { ...draft, points: pointsForDay(deriveStreak([...priorDays, draft], date)) }
+}
+
+function dayRecordsEqual(a: DayStatsRecord, b: DayStatsRecord): boolean {
+  return (Object.keys(a) as (keyof DayStatsRecord)[]).every((key) => a[key] === b[key])
+}
+
+function snapshotOf(record: DayStatsRecord): StatsGoalSnapshot {
+  return {
+    quotaTargetWords: record.quotaTargetWords,
+    weeklyTargetDays: record.weeklyTargetDays
+  }
+}
+
+function normalizeLoadedStore(parsed: Partial<StoreData>): StoreData {
+  const categories = repairStoredCategories(parsed.categories)
+  const texts = assignValidTextCategories(parsed.texts, categories)
+
+  return {
+    nextId: nullishOr(parsed.nextId, 1),
+    nextCategoryId: resolveLoadedNextCategoryId(parsed.nextCategoryId, categories),
+    nextSegmentId: nullishOr(parsed.nextSegmentId, 1),
+    nextBookmarkId: nullishOr(parsed.nextBookmarkId, 1),
+    nextSummaryId: nullishOr(parsed.nextSummaryId, 1),
+    nextSummaryQuestionId: nullishOr(parsed.nextSummaryQuestionId, 1),
+    texts,
+    categories,
+    segments: recordArrayOrEmpty<TextSegment>(parsed.segments),
+    bookmarks: recordArrayOrEmpty<Bookmark>(parsed.bookmarks),
+    summaries: recordArrayOrEmpty<Summary>(parsed.summaries),
+    summaryQuestions: recordArrayOrEmpty<SummaryQuestion>(parsed.summaryQuestions),
+    readingPositions: recordArrayOrEmpty<ReadingPosition>(parsed.readingPositions),
+    settings: settingsStoreFromFlat(parsed.settings),
+    seededIds: normalizeSeededIds(parsed.seededIds),
+    seededBundleVersion: normalizeSeededBundleVersion(parsed.seededBundleVersion),
+    stats: normalizeStats(parsed.stats)
+  }
+}
+
+type OptionalTextFields = Pick<
+  TextRecord,
+  | 'author'
+  | 'source_type'
+  | 'page_count'
+  | 'content_html'
+  | 'content_display'
+  | 'import_diagnostics'
+  | 'import_blocks'
+>
+
+function selectOptionalTextFields(text: Partial<TextRecord>): Partial<OptionalTextFields> {
+  return {
+    ...(text.author !== undefined && { author: text.author }),
+    ...(text.source_type !== undefined && { source_type: text.source_type }),
+    ...(text.page_count !== undefined && { page_count: text.page_count }),
+    ...(text.content_html !== undefined && { content_html: text.content_html }),
+    ...(text.content_display !== undefined && { content_display: text.content_display }),
+    ...(text.import_diagnostics !== undefined && { import_diagnostics: text.import_diagnostics }),
+    ...(text.import_blocks !== undefined && { import_blocks: text.import_blocks })
+  }
+}
+
+function countTextWords(content: string | undefined): number {
+  return content
+    ? content
+        .trim()
+        .split(/\s+/)
+        .filter((word) => word.length > 0).length
+    : 0
+}
+
+function resolveTextCategoryId(
+  categoryId: number | undefined,
+  categories: CategoryRecord[]
+): number {
+  const validCategoryIds = new Set(categories.map((category) => category.id))
+  return typeof categoryId === 'number' && validCategoryIds.has(categoryId)
+    ? categoryId
+    : UNCATEGORIZED_CATEGORY_ID
+}
+
+function buildUpdatedTextRecord(
+  current: TextRecord,
+  incoming: Partial<TextRecord>,
+  wordCount: number,
+  resolvedCategoryId: number,
+  updatedAt: string
+): TextRecord {
+  return {
+    ...current,
+    title: incoming.title ?? current.title,
+    content: incoming.content ?? current.content,
+    word_count: incoming.content !== undefined ? wordCount : current.word_count,
+    is_manual_book: incoming.is_manual_book ?? current.is_manual_book,
+    ...selectOptionalTextFields(incoming),
+    ...(incoming.category_id !== undefined && { category_id: resolvedCategoryId }),
+    updated_at: updatedAt
+  }
+}
+
+function buildNewTextRecord(
+  incoming: Partial<TextRecord>,
+  id: number,
+  wordCount: number,
+  resolvedCategoryId: number,
+  createdAt: string
+): TextRecord {
+  return {
+    id,
+    title: incoming.title ?? 'Untitled',
+    content: incoming.content ?? '',
+    word_count: wordCount,
+    is_manual_book: incoming.is_manual_book ?? false,
+    // Frozen curated-book marker (ADR-0033); undefined for ordinary user texts
+    // and dropped by JSON.stringify, so they carry no seed_id on disk.
+    seed_id: incoming.seed_id,
+    // Publisher metadata captured by EPUB import (ADR-0034 §7); absent — and
+    // so dropped by JSON.stringify — for every other ingestion channel.
+    ...selectOptionalTextFields(incoming),
+    category_id: resolvedCategoryId,
+    created_at: createdAt,
+    updated_at: createdAt
+  }
 }
 
 export class Database {
@@ -149,74 +484,7 @@ export class Database {
         } catch (err) {
           return this.recoverCorruptStore(err)
         }
-        const builtInCategories: CategoryRecord[] = [
-          { id: UNCATEGORIZED_CATEGORY_ID, name: 'Uncategorized', is_system: true, is_locked: true },
-          { id: READING_CATEGORY_ID, name: 'Reading', is_system: true },
-          { id: ARCHIVE_CATEGORY_ID, name: 'Archive', is_system: true }
-        ]
-        const sourceCategories = Array.isArray(parsed.categories) ? parsed.categories : []
-        const parsedCategories = sourceCategories
-          .map((category): CategoryRecord | null => {
-            if (!category || typeof category !== 'object') return null
-            const id = Number(category.id)
-            const name = typeof category.name === 'string' ? category.name.trim() : ''
-            if (!Number.isInteger(id) || id <= 0 || !name) return null
-            return {
-              id,
-              name,
-              is_system: category.is_system === true ? true : undefined,
-              is_locked: category.is_locked === true ? true : undefined
-            }
-          })
-          .filter((category): category is CategoryRecord => category !== null)
-        const categoriesById = new Map<number, CategoryRecord>()
-        for (const category of parsedCategories) categoriesById.set(category.id, category)
-        for (const builtIn of builtInCategories) {
-          const existing = categoriesById.get(builtIn.id)
-          if (!existing) {
-            categoriesById.set(builtIn.id, builtIn)
-            continue
-          }
-          categoriesById.set(builtIn.id, {
-            ...existing,
-            is_system: true,
-            is_locked: builtIn.id === UNCATEGORIZED_CATEGORY_ID ? true : existing.is_locked
-          })
-        }
-        const normalizedCategories = [...categoriesById.values()].sort((a, b) => a.id - b.id)
-        const validCategoryIds = new Set(normalizedCategories.map((c) => c.id))
-        const normalizedTexts = (Array.isArray(parsed.texts) ? parsed.texts : []).map((text) => {
-          const categoryId = Number(text?.category_id)
-          const resolvedCategoryId =
-            Number.isInteger(categoryId) && validCategoryIds.has(categoryId)
-              ? categoryId
-              : UNCATEGORIZED_CATEGORY_ID
-          return { ...text, category_id: resolvedCategoryId }
-        })
-        const maxCategoryId = normalizedCategories.reduce((max, category) => Math.max(max, category.id), 0)
-        const parsedNextCategoryId = Number(parsed.nextCategoryId)
-        const nextCategoryId =
-          Number.isInteger(parsedNextCategoryId) && parsedNextCategoryId > maxCategoryId
-            ? parsedNextCategoryId
-            : maxCategoryId + 1
-        return {
-          nextId: parsed.nextId ?? 1,
-          nextCategoryId,
-          nextSegmentId: parsed.nextSegmentId ?? 1,
-          nextBookmarkId: parsed.nextBookmarkId ?? 1,
-          nextSummaryId: parsed.nextSummaryId ?? 1,
-          nextSummaryQuestionId: parsed.nextSummaryQuestionId ?? 1,
-          texts: normalizedTexts,
-          categories: normalizedCategories,
-          segments: Array.isArray(parsed.segments) ? parsed.segments : [],
-          bookmarks: Array.isArray(parsed.bookmarks) ? parsed.bookmarks : [],
-          summaries: Array.isArray(parsed.summaries) ? parsed.summaries : [],
-          summaryQuestions: Array.isArray(parsed.summaryQuestions) ? parsed.summaryQuestions : [],
-          readingPositions: Array.isArray(parsed.readingPositions) ? parsed.readingPositions : [],
-          settings: settingsStoreFromFlat(parsed.settings),
-          seededIds: normalizeSeededIds(parsed.seededIds),
-          seededBundleVersion: normalizeSeededBundleVersion(parsed.seededBundleVersion)
-        }
+        return normalizeLoadedStore(parsed)
       }
     } catch {
       // Corrupted file — fall through to defaults
@@ -233,11 +501,7 @@ export class Database {
       nextSummaryId: 1,
       nextSummaryQuestionId: 1,
       texts: [],
-      categories: [
-        { id: UNCATEGORIZED_CATEGORY_ID, name: 'Uncategorized', is_system: true, is_locked: true },
-        { id: READING_CATEGORY_ID, name: 'Reading', is_system: true },
-        { id: ARCHIVE_CATEGORY_ID, name: 'Archive', is_system: true }
-      ],
+      categories: createBuiltInCategories(),
       segments: [],
       bookmarks: [],
       summaries: [],
@@ -245,7 +509,8 @@ export class Database {
       readingPositions: [],
       settings: settingsStoreFromFlat({}),
       seededIds: [],
-      seededBundleVersion: 0
+      seededBundleVersion: 0,
+      stats: createEmptyStats()
     }
   }
 
@@ -254,7 +519,7 @@ export class Database {
     const data = this.createDefaultStore()
     this.writeData(data)
     this.logger.warn(
-      `Corrupt store recovered: moved ${this.storePath} to ${backupPath} and reseeded defaults.`,
+      `Corrupt store recovered: moved ${this.storePath} to ${backupPath} and wrote fresh defaults.`,
       error
     )
     return data
@@ -295,13 +560,24 @@ export class Database {
 
   getTexts(): TextRecord[] {
     return this.data.texts
-      .map(({ id, title, word_count, category_id, created_at, updated_at }) => {
+      .map(({ id, title, word_count, category_id, seed_id, source_type, created_at, updated_at }) => {
         const segment_count = this.data.segments.filter((s) => s.textId === id).length
         return {
           id,
           title,
           word_count,
           category_id,
+          // Carried in the list projection because the Library reads curated-book
+          // identity off it: `seed_id` drives the ADR-0023 "chapters" vocabulary,
+          // suppresses Add Content, and is how an imported Winglet Book is found
+          // again after commit. Dropping it made every curated book look like a
+          // user text in the list. Content stays out of the projection.
+          seed_id,
+          // The second origin axis (ADR-0034 §8): `source_type: 'epub'` also says
+          // "chapters", because an EPUB's chapters are the publisher's own. It is
+          // deliberately NOT the same axis as `seed_id` — an EPUB book stays
+          // mutable, so only `seed_id` suppresses Add Content.
+          source_type,
           segment_count: segment_count > 0 ? segment_count : undefined,
           created_at,
           updated_at
@@ -314,62 +590,42 @@ export class Database {
     return this.data.texts.find((t) => t.id === id) ?? null
   }
 
+  /**
+   * Winglet Book identity lookup (ADR-0033 §3.5): duplicate detection is
+   * `seed_id` equality among the texts CURRENTLY present — deliberately not the
+   * dormant ADR-0018 ledger — so a book the user deleted can be re-imported.
+   */
+  hasSeedId(seedId: string): boolean {
+    return this.data.texts.some((text) => text.seed_id === seedId)
+  }
+
   saveText(text: Partial<TextRecord>): TextRecord {
-    const wordCount = text.content
-      ? text.content
-          .trim()
-          .split(/\s+/)
-          .filter((w) => w.length > 0).length
-      : 0
+    const wordCount = countTextWords(text.content)
     const now = new Date().toISOString()
-    const validCategoryIds = new Set(this.data.categories.map((category) => category.id))
-    const resolvedCategoryId =
-      typeof text.category_id === 'number' && validCategoryIds.has(text.category_id)
-        ? text.category_id
-        : UNCATEGORIZED_CATEGORY_ID
+    const resolvedCategoryId = resolveTextCategoryId(text.category_id, this.data.categories)
 
     if (text.id) {
       const idx = this.data.texts.findIndex((t) => t.id === text.id)
       if (idx !== -1) {
-        this.data.texts[idx] = {
-          ...this.data.texts[idx],
-          title: text.title ?? this.data.texts[idx].title,
-          content: text.content ?? this.data.texts[idx].content,
-          word_count: text.content !== undefined ? wordCount : this.data.texts[idx].word_count,
-          is_manual_book: text.is_manual_book ?? this.data.texts[idx].is_manual_book,
-          ...(text.source_type !== undefined && { source_type: text.source_type }),
-          ...(text.page_count !== undefined && { page_count: text.page_count }),
-          ...(text.content_html !== undefined && { content_html: text.content_html }),
-          ...(text.content_display !== undefined && { content_display: text.content_display }),
-          ...(text.import_diagnostics !== undefined && { import_diagnostics: text.import_diagnostics }),
-          ...(text.import_blocks !== undefined && { import_blocks: text.import_blocks }),
-          ...(text.category_id !== undefined && { category_id: resolvedCategoryId }),
-          updated_at: now
-        }
+        this.data.texts[idx] = buildUpdatedTextRecord(
+          this.data.texts[idx],
+          text,
+          wordCount,
+          resolvedCategoryId,
+          now
+        )
         this.save()
         return this.getText(text.id)!
       }
     }
 
-    const record: TextRecord = {
-      id: this.data.nextId++,
-      title: text.title ?? 'Untitled',
-      content: text.content ?? '',
-      word_count: wordCount,
-      is_manual_book: text.is_manual_book ?? false,
-      // Seed loader stamp (ADR-0018); undefined for all other inserts and dropped
-      // by JSON.stringify on save, so non-seeded records carry no seed_id on disk.
-      seed_id: text.seed_id,
-      ...(text.source_type !== undefined && { source_type: text.source_type }),
-      ...(text.page_count !== undefined && { page_count: text.page_count }),
-      ...(text.content_html !== undefined && { content_html: text.content_html }),
-      ...(text.content_display !== undefined && { content_display: text.content_display }),
-      ...(text.import_diagnostics !== undefined && { import_diagnostics: text.import_diagnostics }),
-      ...(text.import_blocks !== undefined && { import_blocks: text.import_blocks }),
-      category_id: resolvedCategoryId,
-      created_at: now,
-      updated_at: now
-    }
+    const record = buildNewTextRecord(
+      text,
+      this.data.nextId++,
+      wordCount,
+      resolvedCategoryId,
+      now
+    )
     this.data.texts.push(record)
     this.save()
     return record
@@ -468,6 +724,9 @@ export class Database {
     this.data.summaryQuestions = this.data.summaryQuestions.filter((q) => q.textId !== id)
     this.data.summaries = this.data.summaries.filter((s) => s.textId !== id)
     this.data.readingPositions = this.data.readingPositions.filter((p) => p.textId !== id)
+    // Deliberately no cascade into `stats` (ADR-0035 §4): history is history —
+    // the reading happened, and each session record's title snapshot keeps it
+    // displayable after the text is gone.
     this.save()
   }
 
@@ -737,6 +996,277 @@ export class Database {
     return this.getSettingsStore()
   }
 
+  // ── Stats (ADR-0035 §4) ──────────────────────────────────────────────────
+  //
+  // The main process owns every day rule: date assignment, folding, pruning and
+  // the points/streak verdict. Two tiers, one invariant — a day record is the
+  // complete truth for a **closed** day, and `sessions[]` holds only sessions
+  // whose day has not closed yet. Today's sums stay live, but its goal snapshot
+  // freezes at the first session; closed days stay absolute (ADR-0036 §5).
+  //
+  // Reads fold before answering, so no surface can observe a stale day.
+
+  /**
+   * Records one finished standard-Reader session. Exactly **one** store write
+   * per call — measurement never writes per beat (ADR-0035 §2).
+   */
+  recordSessionStats(record: SessionStatsRecord): void {
+    const todayKey = localDateKey(Date.now())
+    const session = normalizeSessionStatsRecord(record)
+    // A session that advanced no words is not recorded (ADR-0035 §2) — it would
+    // add a session count and a fluency sample with no reading behind it.
+    if (session && session.wordsRead > 0) this.appendSessionStats(session, todayKey)
+    this.refreshStats(todayKey)
+    this.save()
+  }
+
+  /** Lifetime, today and highscore figures — all derived, none stored. */
+  getStatsOverview(): StatsOverview {
+    const todayKey = this.refreshStatsAndSave()
+    const days = this.data.stats.days
+    const goals = this.currentGoalStatus(todayKey)
+    const today = days.find((day) => day.date === todayKey) ?? {
+      date: todayKey,
+      ...emptyDaySums(),
+      ...this.currentGoalSnapshot(),
+      weeklyTargetDays: goals.weeklyTargetDays,
+      quotaMet: false,
+      points: 0
+    }
+
+    const totals = days.reduce(
+      (sum, day) => ({
+        wordsRead: sum.wordsRead + day.wordsRead,
+        wallMs: sum.wallMs + day.wallMs,
+        activeMs: sum.activeMs + day.activeMs,
+        pauses: sum.pauses + day.pauses,
+        rewinds: sum.rewinds + day.rewinds,
+        sessionCount: sum.sessionCount + day.sessionCount,
+        activeDays: sum.activeDays + 1
+      }),
+      { wordsRead: 0, wallMs: 0, activeMs: 0, pauses: 0, rewinds: 0, sessionCount: 0, activeDays: 0 }
+    )
+
+    return {
+      totals,
+      today: {
+        date: todayKey,
+        wordsRead: today.wordsRead,
+        wallMs: today.wallMs,
+        activeMs: today.activeMs,
+        sessionCount: today.sessionCount,
+        quotaTargetWords: today.quotaTargetWords,
+        quotaPercent: Math.round((today.wordsRead / today.quotaTargetWords) * 100),
+        quotaMet: today.quotaMet,
+        points: today.points,
+        fluency: fluencyScore(
+          interruptionRate({
+            pauses: today.pauses,
+            rewinds: today.rewinds,
+            activeMs: today.activeMs
+          })
+        )
+      },
+      goals,
+      streak: deriveStreak(days, todayKey),
+      points: days.reduce((sum, day) => sum + day.points, 0),
+      highscores: this.deriveHighscores(todayKey)
+    }
+  }
+
+  /** Every day record, oldest first. */
+  getStatsDays(): DayStatsRecord[] {
+    this.refreshStatsAndSave()
+    return this.data.stats.days.map((day) => ({ ...day }))
+  }
+
+  /** Today's session records, oldest first. */
+  getTodaySessionStats(): SessionStatsRecord[] {
+    const todayKey = this.refreshStatsAndSave()
+    return this.data.stats.sessions
+      .filter((session) => localDateKey(session.startedAt) === todayKey)
+      .sort((a, b) => a.startedAt - b.startedAt)
+      .map((session) => ({ ...session }))
+  }
+
+  /**
+   * The whole collection as stored — what `data:exportAll` ships. Folds first,
+   * like every other read, so an export never carries a stale open day.
+   */
+  getStatsCollection(): StatsCollection {
+    this.refreshStatsAndSave()
+    return {
+      days: this.data.stats.days.map((day) => ({ ...day })),
+      sessions: this.data.stats.sessions.map((session) => ({ ...session }))
+    }
+  }
+
+  /**
+   * Replaces the whole collection — the import counterpart of
+   * `getStatsCollection`. Replace, not merge: two histories folded together
+   * would claim words that were never read twice. Takes `unknown` because the
+   * payload comes off an import file; normalization drops what it cannot read.
+   */
+  replaceStats(collection: unknown): void {
+    this.data.stats = normalizeStats(collection)
+    this.save()
+  }
+
+  /**
+   * The streak peaks on a quota-met day, so scoring the history as of each of
+   * those days finds the longest run without duplicating the walk `deriveStreak`
+   * already owns.
+   */
+  private deriveHighscores(todayKey: string): StatsOverview['highscores'] {
+    const days = this.data.stats.days
+    return {
+      bestDayWords: days.reduce((best, day) => Math.max(best, day.wordsRead), 0),
+      bestSessionFluency: days.reduce((best, day) => Math.max(best, day.bestSessionFluency), 0),
+      longestSessionMs: days.reduce((best, day) => Math.max(best, day.longestSessionMs), 0),
+      longestStreak: days.reduce(
+        (best, day) => (day.quotaMet ? Math.max(best, deriveStreak(days, day.date)) : best),
+        deriveStreak(days, todayKey)
+      )
+    }
+  }
+
+  /** The quota/weekly-target settings in force right now (ADR-0035 §5). */
+  private currentGoalSnapshot(): StatsGoalSnapshot {
+    const settings = flattenSettingsStore(this.data.settings)
+    return {
+      quotaTargetWords: Math.max(1, Math.round(finiteOrZero(settings.daily_word_quota))),
+      weeklyTargetDays: clampWeeklyTargetDays(settings.weekly_quota_days)
+    }
+  }
+
+  /** First recorded day in `dateKey`'s Monday-based week, if the pin exists. */
+  private firstRecordedDayInWeek(dateKey: string): DayStatsRecord | undefined {
+    const monday = weekStartKey(dateKey)
+    let first: DayStatsRecord | undefined
+    for (const day of this.data.stats.days) {
+      if (day.date > dateKey || weekStartKey(day.date) !== monday) continue
+      // A later duplicate for the same date is authoritative, matching streak
+      // derivation; an earlier calendar date always wins the weekly pin.
+      if (!first || day.date <= first.date) first = day
+    }
+    return first
+  }
+
+  /** Goal effectivity carried on the existing overview read surface. */
+  private currentGoalStatus(todayKey: string): StatsOverview['goals'] {
+    const live = this.currentGoalSnapshot()
+    const today = this.data.stats.days.find((day) => day.date === todayKey)
+    const firstThisWeek = this.firstRecordedDayInWeek(todayKey)
+    return {
+      dailyPinned: Boolean(today && today.sessionCount > 0),
+      weeklyPinned: Boolean(firstThisWeek),
+      weeklyTargetDays: firstThisWeek?.weeklyTargetDays ?? live.weeklyTargetDays
+    }
+  }
+
+  /** New days take a live daily quota and this week's first weekly snapshot. */
+  private goalSnapshotForNewDay(dateKey: string): StatsGoalSnapshot {
+    const live = this.currentGoalSnapshot()
+    return {
+      quotaTargetWords: live.quotaTargetWords,
+      weeklyTargetDays:
+        this.firstRecordedDayInWeek(dateKey)?.weeklyTargetDays ?? live.weeklyTargetDays
+    }
+  }
+
+  private refreshStatsAndSave(): string {
+    const todayKey = localDateKey(Date.now())
+    if (this.refreshStats(todayKey)) this.save()
+    return todayKey
+  }
+
+  /**
+   * Closes out every day before today and re-derives today's live record.
+   * Returns whether anything changed; never saves — the caller owns the write.
+   */
+  private refreshStats(todayKey: string): boolean {
+    const folded = this.foldClosedDays(todayKey)
+    return this.recomputeTodayRecord(todayKey) || folded
+  }
+
+  private appendSessionStats(session: SessionStatsRecord, todayKey: string): void {
+    const dateKey = localDateKey(session.startedAt)
+    const closed = this.data.stats.days.find((day) => day.date === dateKey)
+    // A late arrival for an already-folded day (a run that crossed midnight
+    // while a stats read closed the old day) merges straight into that frozen
+    // record. Folding rebuilds a day *from its sessions*, so parking this one in
+    // `sessions[]` would erase everything else that day already held.
+    if (dateKey < todayKey && closed) {
+      this.writeDayRecord(
+        buildDayRecord(
+          dateKey,
+          mergeDaySums(closed, foldSessionsIntoDay([sessionSums(session)])),
+          snapshotOf(closed),
+          this.data.stats.days
+        )
+      )
+      return
+    }
+    this.data.stats.sessions.push(session)
+  }
+
+  private foldClosedDays(todayKey: string): boolean {
+    const isClosed = (session: SessionStatsRecord): boolean =>
+      localDateKey(session.startedAt) < todayKey
+    const closedSessions = this.data.stats.sessions.filter(isClosed)
+    if (closedSessions.length === 0) return false
+
+    const byDate = new Map<string, SessionStatsRecord[]>()
+    for (const session of closedSessions) {
+      const key = localDateKey(session.startedAt)
+      const bucket = byDate.get(key)
+      if (bucket) bucket.push(session)
+      else byDate.set(key, [session])
+    }
+
+    // Oldest first, so each day's streak is scored against days already closed.
+    for (const key of [...byDate.keys()].sort()) {
+      const existing = this.data.stats.days.find((day) => day.date === key)
+      // Existing records are absolute. A day first seen during this fold takes
+      // the live daily quota but inherits the week's first target snapshot.
+      const snapshot = existing ? snapshotOf(existing) : this.goalSnapshotForNewDay(key)
+      const sums = foldSessionsIntoDay((byDate.get(key) ?? []).map(sessionSums))
+      this.writeDayRecord(buildDayRecord(key, sums, snapshot, this.data.stats.days))
+    }
+
+    this.data.stats.sessions = this.data.stats.sessions.filter((session) => !isClosed(session))
+    return true
+  }
+
+  private recomputeTodayRecord(todayKey: string): boolean {
+    const todaySessions = this.data.stats.sessions.filter(
+      (session) => localDateKey(session.startedAt) === todayKey
+    )
+    // Nothing read today — no record to derive. Any existing one (a day record
+    // written under a clock that has since moved back) is left untouched rather
+    // than replaced with an empty day.
+    if (todaySessions.length === 0) return false
+
+    const existing = this.data.stats.days.find((day) => day.date === todayKey)
+    const next = buildDayRecord(
+      todayKey,
+      foldSessionsIntoDay(todaySessions.map(sessionSums)),
+      existing ? snapshotOf(existing) : this.goalSnapshotForNewDay(todayKey),
+      this.data.stats.days
+    )
+    if (existing && dayRecordsEqual(existing, next)) return false
+    this.writeDayRecord(next)
+    return true
+  }
+
+  /** Upserts a day record, keeping `days` sorted oldest-first. */
+  private writeDayRecord(record: DayStatsRecord): void {
+    const days = this.data.stats.days.filter((day) => day.date !== record.date)
+    days.push(record)
+    days.sort((a, b) => (a.date < b.date ? -1 : 1))
+    this.data.stats.days = days
+  }
+
   // ── Summaries ────────────────────────────────────────────────────────────
 
   getSummaries(textId: number): Summary[] {
@@ -906,28 +1436,4 @@ export class Database {
     return { ...record }
   }
 
-  // ── Seed loader ledger (ADR-0018) ─────────────────────────────────────────
-
-  /** Highest bundle version already applied; 0 on a never-seeded store. */
-  getSeededBundleVersion(): number {
-    return this.data.seededBundleVersion
-  }
-
-  /** A copy of the permanent ledger of every `seedId` ever inserted. */
-  getSeededIds(): string[] {
-    return [...this.data.seededIds]
-  }
-
-  /** Records a freshly inserted seedId; ignores ids already in the ledger. */
-  addSeededId(seedId: string): void {
-    if (this.data.seededIds.includes(seedId)) return
-    this.data.seededIds.push(seedId)
-    this.save()
-  }
-
-  /** Advances the applied bundle version (the seed-scan early-out gate). */
-  setSeededBundleVersion(version: number): void {
-    this.data.seededBundleVersion = version
-    this.save()
-  }
 }

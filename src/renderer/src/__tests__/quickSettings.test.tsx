@@ -59,6 +59,7 @@ vi.stubGlobal('api', {
     getReadingPosition: vi.fn().mockResolvedValue(null),
     getLatestResumeCandidate: vi.fn().mockResolvedValue(null),
     saveReadingPosition: vi.fn().mockResolvedValue({}),
+    recordSessionStats: vi.fn().mockResolvedValue(undefined),
   },
 })
 
@@ -80,8 +81,8 @@ const BASE_SETTINGS: Settings = {
   stack_horizontal_offset: 0,
   theme: 'dark',
   highlight_active: false,
-  lines_enabled: false,
   lines_count: 1,
+  lines_anchor: 'center',
   lines_row_gap: 0,
   segmentation_enabled: false,
   segmentation_threshold: 5000,
@@ -458,6 +459,40 @@ describe('Quick Settings — WPM/min-left hidden in tap mode', () => {
 // ── Quick Settings — flat instrument list (no triplets) ───────────────────────
 
 describe('Quick Settings — flat instrument list', () => {
+  it('uses Line count as the sole row-count control and restores the stored Anchor', () => {
+    const saveSettings = vi.mocked(window.api.db.saveSettings)
+    saveSettings.mockClear()
+    renderReader(SAMPLE_TEXT, { lines_count: 3, lines_anchor: 'top' })
+    openQuickSettings()
+
+    expect(screen.queryByText('Multiple lines')).toBeNull()
+    const count = screen.getByRole('spinbutton', { name: 'Line count value' }) as HTMLInputElement
+    expect(count.value).toBe('3')
+    expect(screen.getByRole('button', { name: 'Top-anchored' }).getAttribute('aria-pressed')).toBe('true')
+
+    fireEvent.change(count, { target: { value: '1' } })
+    fireEvent.blur(count)
+    expect(screen.queryByRole('group', { name: 'Anchor' })).toBeNull()
+    expect(saveSettings).toHaveBeenLastCalledWith(expect.objectContaining({
+      lines_count: 1,
+    }))
+
+    fireEvent.change(count, { target: { value: '3' } })
+    fireEvent.blur(count)
+    expect(screen.getByRole('button', { name: 'Top-anchored' }).getAttribute('aria-pressed')).toBe('true')
+    expect(saveSettings).toHaveBeenLastCalledWith(expect.objectContaining({
+      lines_count: 3,
+    }))
+  })
+
+  it('shows a one-line count without revealing the anchor', () => {
+    renderReader(SAMPLE_TEXT, { lines_count: 1, lines_anchor: 'top' })
+    openQuickSettings()
+
+    expect((screen.getByRole('spinbutton', { name: 'Line count value' }) as HTMLInputElement).value).toBe('1')
+    expect(screen.queryByRole('group', { name: 'Anchor' })).toBeNull()
+  })
+
   it('renders no Simplified/Advanced density switch', () => {
     renderReader(SAMPLE_TEXT)
     openQuickSettings()

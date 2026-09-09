@@ -14,7 +14,8 @@ function sanitizeDocxHtml(html: string): string {
 
 interface PageNodesArgs {
   displayContent: string
-  wordPositions: WordPosition[]
+  /** Read-only: these come off the shared word index, which owns the array. */
+  wordPositions: readonly WordPosition[]
   /** First word index on the Page (inclusive). */
   startWord: number
   /** One past the last word index on the Page (exclusive). */
@@ -98,7 +99,6 @@ interface Props {
   paging: TextPagingState
   textViewMode: 'plain' | 'source'
   onTextViewModeChange: (mode: 'plain' | 'source') => void
-  locateRevision?: number
   showPlainText: boolean
   goalPickArmed?: boolean
   onGoalWordPick?: (wordOffset: number) => void
@@ -114,7 +114,6 @@ export default function TextViewPanel({
   paging,
   textViewMode,
   onTextViewModeChange,
-  locateRevision = 0,
   showPlainText,
   goalPickArmed = false,
   onGoalWordPick = () => {},
@@ -132,6 +131,7 @@ export default function TextViewPanel({
     wordPositions,
     currentPage,
     currentRange,
+    locateRevision,
   } = paging
 
   // Bookmarked words keyed by wordOffset (ADR-0025 §4). Cheap to rebuild — the list

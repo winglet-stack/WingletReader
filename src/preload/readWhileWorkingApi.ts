@@ -1,26 +1,21 @@
 import { ipcRenderer } from 'electron'
+import { createChannelApi, readWhileWorkingChannelContract } from '../shared/channelContract'
 
-export const readWhileWorkingApi = {
-  getStatus: () => ipcRenderer.invoke('rww:getStatus'),
-  hideToTray: () => ipcRenderer.invoke('rww:hideToTray'),
-  enableAndHideToTray: () => ipcRenderer.invoke('rww:enableAndHideToTray'),
-  getTemporarySession: () => ipcRenderer.invoke('rww:getTemporarySession'),
-  finishTemporarySession: (reason: string) =>
-    ipcRenderer.invoke('rww:finishTemporarySession', reason),
-  exit: () => ipcRenderer.invoke('rww:exit'),
-  onExited: (callback: () => void) => {
-    const handler = (): void => callback()
-    ipcRenderer.on('rww:exited', handler)
-    return () => {
-      ipcRenderer.removeListener('rww:exited', handler)
-    }
-  },
-  onEnableFailed: (callback: (error: string) => void) => {
-    const handler = (_event: unknown, payload: { error?: string }): void =>
-      callback(payload?.error ?? 'Read while working could not be enabled.')
-    ipcRenderer.on('rww:enableFailed', handler)
-    return () => {
-      ipcRenderer.removeListener('rww:enableFailed', handler)
-    }
+const enableFailedFallback = 'Read while working could not be enabled.'
+
+/**
+ * The RWW family. Its two event channels are subscriptions, not invocations, so
+ * the contract types them separately and preload supplies the only part that is
+ * genuinely transport: turning raw `ipcRenderer` event arguments into the
+ * callback arguments the contract promises.
+ */
+export const readWhileWorkingApi = createChannelApi(
+  ipcRenderer,
+  readWhileWorkingChannelContract,
+  {
+    onExited: () => [],
+    onEnableFailed: (_event, payload) => [
+      (payload as { error?: string } | undefined)?.error ?? enableFailedFallback
+    ]
   }
-}
+)

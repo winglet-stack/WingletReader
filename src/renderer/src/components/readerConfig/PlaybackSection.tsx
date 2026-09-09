@@ -3,6 +3,7 @@ import type { Settings } from '../../types'
 import NumericInput from '../NumericInput'
 import AdvanceKeyRow from './AdvanceKeyRow'
 import PlaybackSpeedRows from './PlaybackSpeedRows'
+import { effectiveLinesCount, linesCountPatch } from '../../../../shared/settings'
 
 interface Props {
   local: Settings
@@ -63,40 +64,21 @@ export default function PlaybackSection({ local, update }: Props) {
       </div>
 
       <div className="settings-row">
-        <label className="settings-label">
-          Multiple lines
-          <span className="settings-hint">Stack multiple rows of word groups before redrawing</span>
+        <label htmlFor="rcp-lines-count" className="settings-label">
+          Line count
+          <span className="settings-hint">Rows of word stacks displayed before redrawing; 1 is single-line</span>
         </label>
         <div className="settings-control">
-          <label className="toggle">
-            <input
-              type="checkbox"
-              checked={local.lines_enabled}
-              onChange={(e) => update({ lines_enabled: e.target.checked })}
-            />
-            <span className="toggle-track" />
-          </label>
+          <NumericInput
+            id="rcp-lines-count"
+            value={effectiveLinesCount(local)}
+            min={1}
+            max={10}
+            onCommit={(lines_count) => update(linesCountPatch(lines_count))}
+            ariaLabel="Line count value"
+          />
         </div>
       </div>
-
-      {local.lines_enabled && (
-        <div className="settings-row rcp-indented">
-          <label htmlFor="rcp-lines-count" className="settings-label">
-            Lines per screen
-            <span className="settings-hint">Rows of word stacks displayed before redrawing</span>
-          </label>
-          <div className="settings-control">
-            <NumericInput
-              id="rcp-lines-count"
-              value={local.lines_count}
-              min={2}
-              max={10}
-              onCommit={(lines_count) => update({ lines_count })}
-              ariaLabel="Lines per screen value"
-            />
-          </div>
-        </div>
-      )}
 
       <div className="settings-row">
         <label className="settings-label">

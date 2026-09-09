@@ -67,8 +67,8 @@ export const READER_SETTINGS_LAYOUT: readonly ReaderSettingsTab[] = [
             fields: [
               'words_per_stack',
               'stacks_visible',
-              'lines_enabled',
               'lines_count',
+              'lines_anchor',
             ],
           },
         ],

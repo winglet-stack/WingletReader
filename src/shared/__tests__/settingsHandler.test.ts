@@ -5,17 +5,17 @@ import {
   defaultSettingsStore,
   flattenSettingsStore,
   parseSettings,
+  RWW_OVERRIDE_FLAT_TO_READER,
   settingsStoreFromFlat
 } from '../settings'
 import type { Settings, SettingsStore } from '../settings'
 
-// The six Standard Reader fields RWW carries as its independent config (frozen
+// The five Standard Reader fields RWW carries as its independent config (frozen
 // `rww_*` projection set; ADR-0008 / ADR-0014 §5).
 const RWW_READER_FIELDS = [
   'bpm',
   'words_per_stack',
   'stacks_visible',
-  'lines_enabled',
   'lines_count',
   'font_size'
 ] as const
@@ -86,7 +86,7 @@ describe('settingsStoreFromFlat — legacy flat migration', () => {
   })
 
   it('preserves explicit legacy rww_* keys and seeds the rest from reader (ADR-0014 §5)', () => {
-    // reader carries default stacks_visible (1) and lines_count (3).
+    // reader carries default stacks_visible and lines_count values.
     const store = settingsStoreFromFlat(legacyFlat({ rww_bpm: 400, rww_words_per_stack: 5 }))
     // explicit overrides win (lossless)
     expect(store.rww.bpm).toBe(400)
@@ -105,7 +105,6 @@ describe('settingsStoreFromFlat — legacy flat migration', () => {
     expect(store.rww.font_size).toBe(50)
     expect(store.rww.words_per_stack).toBe(store.reader.words_per_stack)
     expect(store.rww.stacks_visible).toBe(store.reader.stacks_visible)
-    expect(store.rww.lines_enabled).toBe(store.reader.lines_enabled)
     expect(store.rww.lines_count).toBe(store.reader.lines_count)
   })
 
@@ -130,7 +129,115 @@ describe('settingsStoreFromFlat — legacy flat migration', () => {
   })
 })
 
+describe('LB-5 line-count migration', () => {
+  it('migrates a legacy flat disabled value to one line and drops the key', () => {
+    const raw = legacyFlat({ lines_count: 3 } as Partial<Settings>)
+    raw.lines_enabled = false
+
+    const store = settingsStoreFromFlat(raw)
+    const flat = flattenSettingsStore(store) as Record<string, unknown>
+
+    expect(store.reader.lines_count).toBe(1)
+    expect(flat.lines_count).toBe(1)
+    expect('lines_enabled' in flat).toBe(false)
+  })
+
+  it('preserves a legacy flat enabled count', () => {
+    const raw = legacyFlat({ lines_count: 4 } as Partial<Settings>)
+    raw.lines_enabled = true
+
+    expect(settingsStoreFromFlat(raw).reader.lines_count).toBe(4)
+  })
+
+  it('migrates store.global independently before scope projection', () => {
+    const store = settingsStoreFromFlat({
+      global: { lines_enabled: false, lines_count: 3 },
+      reader: {},
+      rww: {},
+    })
+
+    expect(store.reader.lines_count).toBe(1)
+  })
+
+  it('migrates store.reader independently', () => {
+    const store = settingsStoreFromFlat({
+      global: {},
+      reader: { lines_enabled: false, lines_count: 3 },
+      rww: {},
+    })
+
+    expect(store.reader.lines_count).toBe(1)
+    expect('lines_enabled' in store.reader).toBe(false)
+  })
+
+  it('migrates direct and flat-key forms in store.rww to a count override', () => {
+    const direct = settingsStoreFromFlat({
+      global: {},
+      reader: { lines_count: 4 },
+      rww: { lines_enabled: false, lines_count: 3 },
+    })
+    const flatKey = settingsStoreFromFlat({
+      global: {},
+      reader: { lines_count: 4 },
+      rww: { rww_lines_enabled: false, rww_lines_count: 3 },
+    })
+
+    expect(direct.rww.lines_count).toBe(1)
+    expect(flatKey.rww.lines_count).toBe(1)
+    expect((flattenSettingsStore(flatKey) as Record<string, unknown>).rww_lines_count).toBe(1)
+  })
+
+  it('migrates every saved Reader config and playback preset entry', () => {
+    const raw = legacyFlat() as Record<string, unknown>
+    raw.custom_reader_configs = [
+      { id: 'reader:one', name: 'One', lines_enabled: false, lines_count: 3 },
+      { id: 'reader:four', name: 'Four', lines_enabled: true, lines_count: 4 },
+    ]
+    raw.custom_playback_presets = [
+      { id: 'playback:one', name: 'One', lines_enabled: false, lines_count: 5 },
+      { id: 'playback:four', name: 'Four', lines_enabled: true, lines_count: 4 },
+    ]
+    raw.custom_rww_playback_presets = [
+      { id: 'rww:one', name: 'One', lines_enabled: false, lines_count: 6 },
+      { id: 'rww:four', name: 'Four', lines_enabled: true, lines_count: 4 },
+    ]
+
+    const store = settingsStoreFromFlat(raw)
+    const reader = store.reader
+    const configs = reader.custom_reader_configs as unknown as Array<Record<string, unknown>>
+    const presets = reader.custom_playback_presets as unknown as Array<Record<string, unknown>>
+    const rwwPresets = store.rww.custom_rww_playback_presets as unknown as Array<Record<string, unknown>>
+
+    expect(configs.map((entry) => entry.lines_count)).toEqual([1, 4])
+    expect(presets.map((entry) => entry.lines_count)).toEqual([1, 4])
+    expect(rwwPresets.map((entry) => entry.lines_count)).toEqual([1, 4])
+    expect([...configs, ...presets, ...rwwPresets].every((entry) => !('lines_enabled' in entry))).toBe(true)
+  })
+
+  it('is idempotent across nested and flattened normalisation', () => {
+    const raw = legacyFlat({ lines_count: 3 } as Partial<Settings>)
+    raw.lines_enabled = false
+    raw.rww_lines_enabled = false
+    raw.rww_lines_count = 4
+
+    const once = settingsStoreFromFlat(raw)
+    const twice = settingsStoreFromFlat(once)
+    const projected = settingsStoreFromFlat(flattenSettingsStore(twice))
+
+    expect(twice).toEqual(once)
+    expect(projected).toEqual(once)
+  })
+})
+
 describe('resolveEffectiveSettings — RWW inheritance', () => {
+  it('inherits the reader-scoped line anchor without adding a seventh rww_* key', () => {
+    const store = settingsStoreFromFlat(legacyFlat({ lines_anchor: 'top' }))
+
+    expect(Object.keys(RWW_OVERRIDE_FLAT_TO_READER)).toHaveLength(5)
+    expect('lines_anchor' in store.rww).toBe(false)
+    expect(resolveEffectiveSettings('rww', store).lines_anchor ?? 'center').toBe('top')
+  })
+
   function storeWith(readerBpm: number, rwwOverride?: Partial<SettingsStore['rww']>): SettingsStore {
     const store = settingsStoreFromFlat(legacyFlat({ bpm: readerBpm }))
     if (rwwOverride) store.rww = { ...store.rww, ...rwwOverride }
@@ -182,7 +289,6 @@ describe('resolveEffectiveSettings — RWW inheritance', () => {
       words_per_stack: 3,
       rww_words_per_stack: 5,
       stacks_visible: 2,
-      lines_enabled: false,
       lines_count: 1
     })
     const today = {
@@ -190,14 +296,12 @@ describe('resolveEffectiveSettings — RWW inheritance', () => {
       bpm: 400,
       words_per_stack: 5,
       stacks_visible: 2,
-      lines_enabled: false,
       lines_count: 1
     }
     const resolved = resolveEffectiveSettings('rww', settingsStoreFromFlat(flat))
     expect(resolved.bpm).toBe(today.bpm)
     expect(resolved.words_per_stack).toBe(today.words_per_stack)
     expect(resolved.stacks_visible).toBe(today.stacks_visible)
-    expect(resolved.lines_enabled).toBe(today.lines_enabled)
     expect(resolved.lines_count).toBe(today.lines_count)
   })
 })

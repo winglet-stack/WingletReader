@@ -131,6 +131,24 @@ describe('TextCard segment vocabulary', () => {
       .toBe('View chapters')
   })
 
+  it('renders EPUB book segments as chapters', () => {
+    // ADR-0034 §8: the publisher resolved these chapters, so the card says so —
+    // no seed_id involved.
+    const text = { ...BOOK, source_type: 'epub' as const, segment_count: 86 }
+    renderCard({ text })
+
+    expect(screen.getByText(/4 words/).textContent).toContain('86 chapters')
+    expect(screen.getByRole('button', { name: `View chapters for "${text.title}"` }).getAttribute('title'))
+      .toBe('View chapters')
+  })
+
+  it('keeps contents wording for the other import source types', () => {
+    const text = { ...BOOK, source_type: 'pdf' as const, segment_count: 2 }
+    renderCard({ text })
+
+    expect(screen.getByText(/4 words/).textContent).toContain('2 contents')
+  })
+
   it('shows the segment view action when no segments are present', () => {
     const { onSegments } = renderCard()
 

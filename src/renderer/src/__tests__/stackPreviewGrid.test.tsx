@@ -27,8 +27,8 @@ const BASE_PROPS: StackPreviewGridProps = {
   stackGap: 32,
   stackVerticalOffset: 0,
   stackHorizontalOffset: 0,
-  linesEnabled: false,
   linesCount: 1,
+  linesAnchor: 'center',
   linesRowGap: 0,
   wordsPerStack: 1,
   stageClassName: 'test-stage',
@@ -47,8 +47,8 @@ const BASE_SETTINGS: Settings = {
   stack_horizontal_offset: 0,
   theme: 'dark',
   highlight_active: false,
-  lines_enabled: false,
   lines_count: 1,
+  lines_anchor: 'center',
   lines_row_gap: 0,
   segmentation_enabled: false,
   segmentation_threshold: 5000,
@@ -81,6 +81,56 @@ const BASE_SETTINGS: Settings = {
   custom_playback_presets: [],
   custom_reader_configs: [],
 }
+
+// ── StackPreviewGrid — painter contract ───────────────────────────────────────
+//
+// The preview is a painter over the reader frame (issue 07): what it renders comes
+// from the frame description, not from a layout of its own.
+
+describe('StackPreviewGrid — painter contract', () => {
+  it('renders the frame slots the reader frame describes, in order', () => {
+    const { container } = render(
+      <StackPreviewGrid {...BASE_PROPS} stacksVisible={3} linesCount={2} wordsPerStack={2} />
+    )
+    const words = Array.from(container.querySelectorAll('.stack-words')).map((n) => n.textContent)
+    // Sample corpus, one stack per slot, block order — the frame's slot order.
+    expect(words).toEqual([
+      'the quick', 'brown fox', 'jumps over',
+      'the lazy', 'dog runs', 'fast and',
+    ])
+  })
+
+  it('sizes slots from the frame geometry, not from the raw prop', () => {
+    const { container } = render(<StackPreviewGrid {...BASE_PROPS} stacksVisible={2} fontSize={29} />)
+    const sizes = Array.from(container.querySelectorAll('.stack-words')).map(
+      (n) => (n as HTMLElement).style.fontSize
+    )
+    // Unmeasured preview stage → the solver returns the configured size unchanged.
+    expect(sizes).toEqual(['29px', '29px'])
+  })
+
+  it('highlights the frame\'s current slot — the beat where the line box is full', () => {
+    const { container } = render(
+      <StackPreviewGrid {...BASE_PROPS} stacksVisible={3} linesCount={2} highlightActive={true} highlightColor="#ff0000" />
+    )
+    const rows = container.querySelectorAll('.reader-stack-row')
+    // A block is only complete once the playhead has reached its last row, so the
+    // still preview highlights the first slot of that row.
+    expect(rows[0].querySelectorAll('.stack-slot--active')).toHaveLength(0)
+    const lastRowSlots = rows[1].querySelectorAll('.stack-slot')
+    expect(lastRowSlots[0].className).toContain('stack-slot--active')
+  })
+
+  it('truncates by building a smaller frame, not by cropping a larger one', () => {
+    const { container } = render(
+      <StackPreviewGrid {...BASE_PROPS} stacksVisible={6} maxStacks={4} highlightActive={true} />
+    )
+    // The highlight is inside the capped grid rather than cropped away with column 5.
+    expect(container.querySelectorAll('.stack-slot')).toHaveLength(4)
+    expect(container.querySelectorAll('.stack-slot--active')).toHaveLength(1)
+    expect(container.querySelector('.spg-more')?.textContent).toBe('+ 2 more')
+  })
+})
 
 // ── StackPreviewGrid — stack column count ─────────────────────────────────────
 
@@ -122,32 +172,44 @@ describe('StackPreviewGrid — stack columns', () => {
 // ── StackPreviewGrid — row count ──────────────────────────────────────────────
 
 describe('StackPreviewGrid — rows', () => {
-  it('renders 1 row when linesEnabled is false', () => {
-    const { container } = render(
-      <StackPreviewGrid {...BASE_PROPS} linesEnabled={false} />
-    )
+  it('renders one row for an effective count of one', () => {
+    const { container } = render(<StackPreviewGrid {...BASE_PROPS} linesCount={1} />)
     expect(container.querySelectorAll('.reader-stack-row')).toHaveLength(1)
   })
 
-  it('renders multiple rows when linesEnabled is true', () => {
-    const { container } = render(
-      <StackPreviewGrid {...BASE_PROPS} linesEnabled={true} linesCount={3} />
-    )
+  it('renders multiple rows for a multi-line effective count', () => {
+    const { container } = render(<StackPreviewGrid {...BASE_PROPS} linesCount={3} />)
     expect(container.querySelectorAll('.reader-stack-row')).toHaveLength(3)
   })
 
   it('caps rows at maxRows', () => {
     const { container } = render(
-      <StackPreviewGrid {...BASE_PROPS} linesEnabled={true} linesCount={5} maxRows={3} />
+      <StackPreviewGrid {...BASE_PROPS} linesCount={5} maxRows={3} />
     )
     expect(container.querySelectorAll('.reader-stack-row')).toHaveLength(3)
   })
 
   it('does not cap rows when maxRows exceeds linesCount', () => {
     const { container } = render(
-      <StackPreviewGrid {...BASE_PROPS} linesEnabled={true} linesCount={2} maxRows={5} />
+      <StackPreviewGrid {...BASE_PROPS} linesCount={2} maxRows={5} />
     )
     expect(container.querySelectorAll('.reader-stack-row')).toHaveLength(2)
+  })
+})
+
+describe('StackPreviewGrid — line-box anchor', () => {
+  it('centres the line box for the center anchor', () => {
+    const { container } = render(<StackPreviewGrid {...BASE_PROPS} linesCount={3} linesAnchor="center" />)
+    const stage = container.querySelector('.test-stage') as HTMLElement
+    expect(stage.style.alignItems).toBe('center')
+    expect(stage.dataset.linesAnchor).toBe('center')
+  })
+
+  it('aligns the line box to the top for the top anchor', () => {
+    const { container } = render(<StackPreviewGrid {...BASE_PROPS} linesCount={3} linesAnchor="top" />)
+    const stage = container.querySelector('.test-stage') as HTMLElement
+    expect(stage.style.alignItems).toBe('flex-start')
+    expect(stage.dataset.linesAnchor).toBe('top')
   })
 })
 
@@ -210,17 +272,17 @@ describe('StackPreviewGrid — offset transform', () => {
     expect(inner.style.transform).toBe('translateY(60px) translateX(30px)')
   })
 
-  it('applies row gap when linesEnabled is true', () => {
+  it('applies row gap for multiple effective lines', () => {
     const { container } = render(
-      <StackPreviewGrid {...BASE_PROPS} linesEnabled={true} linesCount={2} linesRowGap={12} />
+      <StackPreviewGrid {...BASE_PROPS} linesCount={2} linesRowGap={12} />
     )
     const inner = container.querySelector('.spg-inner') as HTMLElement
     expect(inner.style.gap).toBe('12px')
   })
 
-  it('omits gap when linesEnabled is false', () => {
+  it('omits gap for one effective line', () => {
     const { container } = render(
-      <StackPreviewGrid {...BASE_PROPS} linesEnabled={false} linesRowGap={12} />
+      <StackPreviewGrid {...BASE_PROPS} linesCount={1} linesRowGap={12} />
     )
     const inner = container.querySelector('.spg-inner') as HTMLElement
     expect(inner.style.gap).toBe('')
@@ -387,22 +449,44 @@ describe('ReaderPreview', () => {
     expect(container.querySelector('.spg-more')?.textContent).toBe('+ 2 more')
   })
 
-  it('caps rows at 3 when linesEnabled', () => {
+  it('caps configured rows at 3', () => {
     const { container } = render(
       <ReaderPreview
-        settings={{ ...BASE_SETTINGS, lines_enabled: true, lines_count: 5 }}
+        settings={{ ...BASE_SETTINGS, lines_count: 5 }}
       />
     )
     expect(container.querySelectorAll('.reader-stack-row')).toHaveLength(3)
   })
 
-  it('renders 1 row when linesEnabled is false regardless of lines_count', () => {
+  it('renders 1 row when lines_count is one', () => {
     const { container } = render(
       <ReaderPreview
-        settings={{ ...BASE_SETTINGS, lines_enabled: false, lines_count: 5 }}
+        settings={{ ...BASE_SETTINGS, lines_count: 1 }}
       />
     )
     expect(container.querySelectorAll('.reader-stack-row')).toHaveLength(1)
+  })
+
+  it('honours the stored top anchor above one line', () => {
+    const { container } = render(
+      <ReaderPreview
+        settings={{ ...BASE_SETTINGS, lines_count: 3, lines_anchor: 'top' }}
+      />
+    )
+    const stage = container.querySelector('.rcp-preview-stage') as HTMLElement
+    expect(stage.style.alignItems).toBe('flex-start')
+    expect(stage.dataset.linesAnchor).toBe('top')
+  })
+
+  it('centres one effective line even when the stored anchor is top', () => {
+    const { container } = render(
+      <ReaderPreview
+        settings={{ ...BASE_SETTINGS, lines_count: 1, lines_anchor: 'top' }}
+      />
+    )
+    const stage = container.querySelector('.rcp-preview-stage') as HTMLElement
+    expect(stage.style.alignItems).toBe('center')
+    expect(stage.dataset.linesAnchor).toBe('center')
   })
 
   it('defaults stack_horizontal_offset to 0 when missing from settings', () => {

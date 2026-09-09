@@ -1,6 +1,5 @@
 import React, { createContext, useContext, useState, useCallback, useMemo, useEffect } from 'react'
-import type { AppView } from '../types'
-import { resolveAlphaView } from '../alphaChrome'
+import type { AppView } from '../appShell/routeTable'
 
 export type SettingsMode = 'global' | 'transmute'
 export type SettingsSubview = 'reader-defaults' | 'overlay-reader' | 'import' | 'data' | null
@@ -47,13 +46,14 @@ export function NavigationProvider({ children }: { children: React.ReactNode }) 
   const [transmuteLaunchTextId, setTransmuteLaunchTextId] = useState<number | null>(null)
   const [transmuteLaunchSource, setTransmuteLaunchSource] = useState<UnsavedTransmuteSource | null>(null)
 
+  // Route *state* only (ADR-0006). Liveness is the route table's policy and is
+  // resolved once, where the shell reads it — not re-enforced here.
   const setView = useCallback((nextView: AppView) => {
-    const resolvedView = resolveAlphaView(nextView)
-    if (resolvedView !== 'settings') {
+    if (nextView !== 'settings') {
       setRawSettingsSubview(null)
       setSettingsSubviewOrigin('settings')
     }
-    setRawView(resolvedView)
+    setRawView(nextView)
   }, [])
 
   const setSettingsSubview = useCallback((subview: SettingsSubview) => {

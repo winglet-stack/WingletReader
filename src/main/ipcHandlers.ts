@@ -5,18 +5,48 @@ import { dirname, join } from 'path'
 import { Database } from './database'
 import { FileParser } from './fileParser'
 import { resolveEffectiveSettings } from '../shared/settingsHandler'
+import {
+  appChannelContract,
+  dataChannelContract,
+  dbChannelContract,
+  fileChannelContract,
+  readWhileWorkingChannelContract,
+  videoChannelContract,
+  type ChannelDefinition,
+  type ChannelHandler
+} from '../shared/channelContract'
 import { createPortableDrive, type PortableProvisioningOptions } from './portableProvisioning'
 import {
   normalizeShortcutInput,
   type ReadWhileWorkingStatus,
   type TemporaryReaderSession
 } from './readWhileWorkingCore'
+import {
+  WINGLET_BOOK_EXTENSION,
+  commitWingletBookFile,
+  parseWingletBookFile
+} from './wingletBookImport'
+import { EPUB_EXTENSION, commitEpubImport, parseEpubImport } from './epubImport'
 
 export interface IpcMainLike {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   handle(channel: string, listener: (event: any, ...args: any[]) => any): void
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   on(channel: string, listener: (event: any, ...args: any[]) => void): void
+}
+
+/**
+ * Registers one contract channel. The definition carries the name; the handler
+ * is checked against the contract's argument tuple and result type, so a
+ * registration that contradicts the contract is a compile error rather than a
+ * runtime surprise.
+ */
+function registerHandler<Definition extends ChannelDefinition<unknown[], unknown>>(
+  ipc: IpcMainLike,
+  definition: Definition,
+  handler: ChannelHandler<Definition>
+): void {
+  ipc.handle(definition.channel, handler)
 }
 
 export interface BrowserWindowLike {
@@ -41,6 +71,8 @@ interface ImportJsonData {
   texts?: ImportJsonText[]
   categories?: Array<{ id: number; name: string; is_system?: boolean; is_locked?: boolean }>
   settings?: object
+  /** Unread here: the store normalizes the collection (ADR-0035 §4). */
+  stats?: object
 }
 
 /**
@@ -124,100 +156,126 @@ export function registerHandlers(
   options: RegisterHandlerOptions = {}
 ): void {
   // ── App metadata ────────────────────────────────────────────────────────────
-  ipc.handle('app:getVersion', () => app.getVersion())
+  registerHandler(ipc, appChannelContract.getVersion, () => app.getVersion())
 
   // ── Texts ──────────────────────────────────────────────────────────────────
-  ipc.handle('db:getTexts', () => db.getTexts())
+  registerHandler(ipc, dbChannelContract.getTexts, () => db.getTexts())
 
-  ipc.handle('db:getText', (_e, id: number) => db.getText(id))
+  registerHandler(ipc, dbChannelContract.getText, (_e, id) => db.getText(id))
 
-  ipc.handle('db:saveText', (_e, text) => db.saveText(text))
+  registerHandler(ipc, dbChannelContract.saveText, (_e, text) => db.saveText(text))
 
-  ipc.handle('db:deleteText', (_e, id: number) => db.deleteText(id))
+  registerHandler(ipc, dbChannelContract.deleteText, (_e, id) => db.deleteText(id))
 
   // ── Categories ─────────────────────────────────────────────────────────────
-  ipc.handle('db:getCategories', () => db.getCategories())
+  registerHandler(ipc, dbChannelContract.getCategories, () => db.getCategories())
 
-  ipc.handle('db:saveCategory', (_e, category) => db.saveCategory(category))
+  registerHandler(ipc, dbChannelContract.saveCategory, (_e, category) =>
+    db.saveCategory(category)
+  )
 
-  ipc.handle('db:deleteCategory', (_e, id: number) => db.deleteCategory(id))
+  registerHandler(ipc, dbChannelContract.deleteCategory, (_e, id) => db.deleteCategory(id))
 
-  ipc.handle('db:assignTextCategory', (_e, textId: number, categoryId: number) =>
+  registerHandler(ipc, dbChannelContract.assignTextCategory, (_e, textId, categoryId) =>
     db.assignTextCategory(textId, categoryId)
   )
 
   // ── Segments ───────────────────────────────────────────────────────────────
-  ipc.handle('db:getSegments', (_e, textId: number) => db.getSegments(textId))
+  registerHandler(ipc, dbChannelContract.getSegments, (_e, textId) => db.getSegments(textId))
 
-  ipc.handle('db:getSegment', (_e, id: number) => db.getSegment(id))
+  registerHandler(ipc, dbChannelContract.getSegment, (_e, id) => db.getSegment(id))
 
-  ipc.handle('db:saveSegments', (_e, textId: number, drafts) =>
+  registerHandler(ipc, dbChannelContract.saveSegments, (_e, textId, drafts) =>
     db.saveSegments(textId, drafts)
   )
 
-  ipc.handle('db:updateSegmentTitle', (_e, id: number, title: string) =>
+  registerHandler(ipc, dbChannelContract.updateSegmentTitle, (_e, id, title) =>
     db.updateSegmentTitle(id, title)
   )
 
-  ipc.handle('db:deleteSegments', (_e, textId: number) => db.deleteSegments(textId))
+  registerHandler(ipc, dbChannelContract.deleteSegments, (_e, textId) =>
+    db.deleteSegments(textId)
+  )
 
-  ipc.handle('db:deleteSegment', (_e, id: number) => db.deleteSegment(id))
+  registerHandler(ipc, dbChannelContract.deleteSegment, (_e, id) => db.deleteSegment(id))
 
-  ipc.handle('db:appendSegment', (_e, textId: number, draft) =>
+  registerHandler(ipc, dbChannelContract.appendSegment, (_e, textId, draft) =>
     db.appendSegment(textId, draft)
   )
 
-  ipc.handle(
-    'db:createChapterFromPassage',
-    (_e, textId: number, startWordOffset: number, endWordOffset: number, title: string) =>
+  registerHandler(
+    ipc,
+    dbChannelContract.createChapterFromPassage,
+    (_e, textId, startWordOffset, endWordOffset, title) =>
       db.createChapterFromPassage(textId, startWordOffset, endWordOffset, title)
   )
 
   // ── Summaries ──────────────────────────────────────────────────────────────
-  ipc.handle('db:getBookmarks', (_e, textId: number) => db.getBookmarks(textId))
+  registerHandler(ipc, dbChannelContract.getBookmarks, (_e, textId) => db.getBookmarks(textId))
 
-  ipc.handle('db:saveBookmark', (_e, textId: number, draft) =>
+  registerHandler(ipc, dbChannelContract.saveBookmark, (_e, textId, draft) =>
     db.saveBookmark(textId, draft)
   )
 
-  ipc.handle('db:updateBookmarkLabel', (_e, id: number, label: string) =>
+  registerHandler(ipc, dbChannelContract.updateBookmarkLabel, (_e, id, label) =>
     db.updateBookmarkLabel(id, label)
   )
 
-  ipc.handle('db:deleteBookmark', (_e, id: number) => db.deleteBookmark(id))
+  registerHandler(ipc, dbChannelContract.deleteBookmark, (_e, id) => db.deleteBookmark(id))
 
-  ipc.handle('db:getSummaries', (_e, textId: number) => db.getSummaries(textId))
+  registerHandler(ipc, dbChannelContract.getSummaries, (_e, textId) => db.getSummaries(textId))
 
-  ipc.handle('db:saveSummary', (_e, data) => db.saveSummary(data))
+  registerHandler(ipc, dbChannelContract.saveSummary, (_e, data) => db.saveSummary(data))
 
-  ipc.handle('db:deleteSummary', (_e, id: number) => db.deleteSummary(id))
+  registerHandler(ipc, dbChannelContract.deleteSummary, (_e, id) => db.deleteSummary(id))
 
   // ── SummaryQuestions ───────────────────────────────────────────────────────
-  ipc.handle('db:getSummaryQuestionsForText', (_e, textId: number) =>
+  registerHandler(ipc, dbChannelContract.getSummaryQuestionsForText, (_e, textId) =>
     db.getSummaryQuestionsForText(textId)
   )
 
-  ipc.handle('db:saveSummaryQuestion', (_e, data) => db.saveSummaryQuestion(data))
+  registerHandler(ipc, dbChannelContract.saveSummaryQuestion, (_e, data) =>
+    db.saveSummaryQuestion(data)
+  )
 
-  ipc.handle('db:deleteSummaryQuestion', (_e, id: number) => db.deleteSummaryQuestion(id))
+  registerHandler(ipc, dbChannelContract.deleteSummaryQuestion, (_e, id) =>
+    db.deleteSummaryQuestion(id)
+  )
 
   // ── ReadingPositions ───────────────────────────────────────────────────────
-  ipc.handle('db:getReadingPosition', (_e, textId: number) => db.getReadingPosition(textId))
+  registerHandler(ipc, dbChannelContract.getReadingPosition, (_e, textId) =>
+    db.getReadingPosition(textId)
+  )
 
-  ipc.handle('db:getLatestResumeCandidate', () => db.getLatestResumeCandidate())
+  registerHandler(ipc, dbChannelContract.getLatestResumeCandidate, () =>
+    db.getLatestResumeCandidate()
+  )
 
-  ipc.handle('db:getBookResumeTarget', (_e, bookTextId: number) =>
+  registerHandler(ipc, dbChannelContract.getBookResumeTarget, (_e, bookTextId) =>
     db.getBookResumeTarget(bookTextId)
   )
 
-  ipc.handle('db:saveReadingPosition', (_e, textId: number, stackIndex: number, source) =>
+  registerHandler(ipc, dbChannelContract.saveReadingPosition, (_e, textId, stackIndex, source) =>
     db.saveReadingPosition(textId, stackIndex, source)
   )
 
-  // ── Settings ───────────────────────────────────────────────────────────────
-  ipc.handle('db:getSettings', () => db.getSettings())
+  // ── Stats ──────────────────────────────────────────────────────────────────
+  // Pure plumbing: the store owns date assignment, folding and the quota
+  // verdict (ADR-0035 §4), so no rule lives on this seam.
+  registerHandler(ipc, dbChannelContract.recordSessionStats, (_e, record) =>
+    db.recordSessionStats(record)
+  )
 
-  ipc.handle('db:saveSettings', (_e, settings) => {
+  registerHandler(ipc, dbChannelContract.getStatsOverview, () => db.getStatsOverview())
+
+  registerHandler(ipc, dbChannelContract.getStatsDays, () => db.getStatsDays())
+
+  registerHandler(ipc, dbChannelContract.getTodaySessionStats, () => db.getTodaySessionStats())
+
+  // ── Settings ───────────────────────────────────────────────────────────────
+  registerHandler(ipc, dbChannelContract.getSettings, () => db.getSettings())
+
+  registerHandler(ipc, dbChannelContract.saveSettings, (_e, settings) => {
     const patch =
       settings && typeof settings === 'object'
         ? {
@@ -243,18 +301,20 @@ export function registerHandlers(
     return saved
   })
 
-  ipc.handle('db:getSettingsStore', () => db.getSettingsStore())
+  registerHandler(ipc, dbChannelContract.getSettingsStore, () => db.getSettingsStore())
 
-  ipc.handle('db:saveSettingsStore', (_e, store) => {
+  registerHandler(ipc, dbChannelContract.saveSettingsStore, (_e, store) => {
     const saved = db.saveSettingsStore(store)
     windows.updateReadWhileWorkingRegistration(db.getSettings())
     return saved
   })
 
   // ── Read while working ─────────────────────────────────────────────────────
-  ipc.handle('rww:getStatus', () => windows.updateReadWhileWorkingRegistration())
+  registerHandler(ipc, readWhileWorkingChannelContract.getStatus, () =>
+    windows.updateReadWhileWorkingRegistration()
+  )
 
-  ipc.handle('rww:hideToTray', () => {
+  registerHandler(ipc, readWhileWorkingChannelContract.hideToTray, () => {
     const status = windows.updateReadWhileWorkingRegistration()
     if (status.enabled && status.registered) {
       windows.ensureTray()
@@ -267,9 +327,11 @@ export function registerHandlers(
   // persist the flag, register shortcuts and hide on success (or re-show on
   // failure) in the main process. The Library header button calls this instead
   // of issuing separate saveSettings + hideToTray calls.
-  ipc.handle('rww:enableAndHideToTray', () => windows.enableReadWhileWorkingAndHide())
+  registerHandler(ipc, readWhileWorkingChannelContract.enableAndHideToTray, () =>
+    windows.enableReadWhileWorkingAndHide()
+  )
 
-  ipc.handle('rww:getTemporarySession', () => {
+  registerHandler(ipc, readWhileWorkingChannelContract.getTemporarySession, () => {
     // Single source of truth for RWW inheritance: the unified Settings handler
     // (ADR-0008). The resolver reproduces the historical `rww_x ?? x` merge.
     const store = db.getSettingsStore()
@@ -277,25 +339,35 @@ export function registerHandlers(
     return { session: windows.temporaryReaderSession, settings: rwwSettings }
   })
 
-  ipc.handle('rww:finishTemporarySession', () => windows.finishTemporaryReaderSession())
+  // Takes no argument. Overlay sessions end the same way whatever prompted it,
+  // and main ends one itself on the exit path, so there is no reason for a
+  // "reason" to be part of this channel (issue 03).
+  registerHandler(ipc, readWhileWorkingChannelContract.finishTemporarySession, () =>
+    windows.finishTemporaryReaderSession()
+  )
 
-  ipc.handle('rww:exit', () => {
+  registerHandler(ipc, readWhileWorkingChannelContract.exit, () => {
     windows.exitReadWhileWorkingMode('Exited Overlay Reader.')
     return { ok: true }
   })
 
   // ── File import ────────────────────────────────────────────────────────────
-  ipc.handle('file:open', async () => {
+  registerHandler(ipc, fileChannelContract.open, async () => {
     if (!windows.mainWindow) return null
 
     const result = await dialog.showOpenDialog(windows.mainWindow as BrowserWindow, {
       title: 'Import Text File',
       properties: ['openFile'],
       filters: [
-        { name: 'Supported Files', extensions: ['txt', 'docx', 'pdf'] },
+        {
+          name: 'Supported Files',
+          extensions: ['txt', 'docx', 'pdf', WINGLET_BOOK_EXTENSION, EPUB_EXTENSION]
+        },
         { name: 'Plain Text', extensions: ['txt'] },
         { name: 'Word Document', extensions: ['docx'] },
         { name: 'PDF', extensions: ['pdf'] },
+        { name: 'Winglet Book', extensions: [WINGLET_BOOK_EXTENSION] },
+        { name: 'EPUB Book', extensions: [EPUB_EXTENSION] },
         { name: 'All Files', extensions: ['*'] }
       ]
     })
@@ -306,10 +378,27 @@ export function registerHandlers(
     const fileName = filePath.split(/[\\/]/).pop() ?? 'Unknown'
     const ext = fileName.includes('.') ? fileName.split('.').pop()!.toLowerCase() : ''
 
+    // Routing only (ADR-0033 §4): the extension is advisory, so this branch just
+    // sends the file down the Winglet Book door instead of the txt/docx/pdf
+    // parser. Whether it really IS a Winglet Book is decided by the `format`
+    // marker in `import:wbookParse`, which the renderer calls next (WB-3).
+    if (ext === WINGLET_BOOK_EXTENSION) {
+      return { kind: 'winglet-book' as const, fileName, filePath }
+    }
+
+    // Same rule for EPUB (ADR-0034 §8; EP-4a): the extension only chooses the
+    // door. Nothing is unzipped here — whether the file really is an EPUB (and
+    // whether it is DRM-free, sane, readable) is decided by the container
+    // ladder in `import:epubParse`, which the renderer calls next.
+    if (ext === EPUB_EXTENSION) {
+      return { kind: 'epub-book' as const, fileName, filePath }
+    }
+
     const parseResult = await FileParser.parse(filePath, ext)
     const title = FileParser.inferTitle(filePath)
 
     return {
+      kind: 'text-file' as const,
       fileName,
       title,
       content: parseResult.content,
@@ -324,7 +413,7 @@ export function registerHandlers(
   })
 
   // ── Export ─────────────────────────────────────────────────────────────────
-  ipc.handle('export:all', async () => {
+  registerHandler(ipc, dataChannelContract.exportAll, async () => {
     if (!windows.mainWindow) return { ok: false, error: 'No window' }
 
     const result = await dialog.showSaveDialog(windows.mainWindow as BrowserWindow, {
@@ -354,7 +443,10 @@ export function registerHandlers(
         }
       }),
       categories: db.getCategories(),
-      settings: db.getSettings()
+      settings: db.getSettings(),
+      // Reading history travels with the library (ADR-0035 §7) — day records
+      // plus today's un-folded sessions, exactly as the store holds them.
+      stats: db.getStatsCollection()
     }
 
     fs.writeFileSync(result.filePath, JSON.stringify(exportData, null, 2), 'utf-8')
@@ -362,7 +454,7 @@ export function registerHandlers(
   })
 
   // ── Import from JSON ───────────────────────────────────────────────────────
-  ipc.handle('import:json', async () => {
+  registerHandler(ipc, dataChannelContract.importJson, async () => {
     if (!windows.mainWindow) return { ok: false, error: 'No window' }
 
     const result = await dialog.showOpenDialog(windows.mainWindow as BrowserWindow, {
@@ -389,14 +481,40 @@ export function registerHandlers(
       windows.updateReadWhileWorkingRegistration()
     }
 
+    // Replace-on-import, unlike texts, which accumulate: two reading histories
+    // cannot be merged day-by-day without inventing words that were never read.
+    // A payload without `stats` (every export before ADR-0035) leaves the
+    // existing history alone.
+    if (data.stats && typeof data.stats === 'object') db.replaceStats(data.stats)
+
     return { ok: true, imported }
   })
+
+  // ── Book intake (parse then commit, one door per format) ──────────────────
+  // Both pairs below are the same ladder — `bookIntake.ts` — behind two format
+  // adapters (`architecture-depth/05`). Parse recognizes the picked file and
+  // returns the confirm-card / refusal envelope without writing; commit re-reads
+  // and re-judges the same path from disk rather than trusting anything from the
+  // parse call, so a duplicate that raced in, or a file edited since, is refused
+  // instead of inserted. Success is one envelope for every format: `committed`
+  // with the new text's id, so the renderer opens the book directly instead of
+  // re-finding it by identity.
+  //
+  // Winglet Book (ADR-0033; WB-2a/WB-2b).
+  registerHandler(ipc, dataChannelContract.parseWingletBook, (_e, filePath) => parseWingletBookFile(db, filePath))
+
+  registerHandler(ipc, dataChannelContract.commitWingletBook, (_e, filePath) => commitWingletBookFile(db, filePath))
+
+  // Publisher e-books (ADR-0034 §2; EP-3). Its adapter walks the container
+  // ladder and names its own refusals, DRM included.
+  registerHandler(ipc, dataChannelContract.parseEpub, (_e, filePath) => parseEpubImport(db, filePath))
+  registerHandler(ipc, dataChannelContract.commitEpub, (_e, filePath) => commitEpubImport(db, filePath))
 
   // ── Portable provisioning ─────────────────────────────────────────────────
   // Native folder picker for the "Create Portable Drive" action. Returns the
   // chosen absolute folder, or `canceled` so the renderer never provisions on a
   // dismissed dialog. `createDirectory` lets the user make a fresh stick folder.
-  ipc.handle('portable:selectTarget', async () => {
+  registerHandler(ipc, dataChannelContract.selectPortableTarget, async () => {
     if (!windows.mainWindow) return { canceled: true }
 
     const result = await dialog.showOpenDialog(windows.mainWindow as BrowserWindow, {
@@ -409,7 +527,7 @@ export function registerHandlers(
     return { canceled: false, targetPath: result.filePaths[0] }
   })
 
-  ipc.handle('portable:createDrive', (_e, targetPath: string) =>
+  registerHandler(ipc, dataChannelContract.createPortableDrive, (_e, targetPath) =>
     createPortableDrive(targetPath, {
       ...defaultPortableProvisioningOptions(db),
       ...options.portableProvisioning

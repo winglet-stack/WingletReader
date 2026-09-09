@@ -166,9 +166,9 @@ describe('reader/video summary labels', () => {
   })
 
   it('formats the stack layout', () => {
-    expect(layoutLabel({ linesEnabled: true, linesCount: 3, stacksVisible: 2 })).toBe('3 rows x 2 columns')
-    expect(layoutLabel({ linesEnabled: false, linesCount: 3, stacksVisible: 1 })).toBe('1 stack')
-    expect(layoutLabel({ linesEnabled: true, linesCount: 1, stacksVisible: 2 })).toBe('2 stacks')
+    expect(layoutLabel({ linesCount: 3, stacksVisible: 2 })).toBe('3 rows x 2 columns')
+    expect(layoutLabel({ linesCount: 1, stacksVisible: 1 })).toBe('1 stack')
+    expect(layoutLabel({ linesCount: 1, stacksVisible: 2 })).toBe('2 stacks')
   })
 
   it('formats spacing and position offsets', () => {

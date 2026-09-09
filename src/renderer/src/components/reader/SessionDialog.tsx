@@ -1,4 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useRef } from 'react'
+import {
+  deviationPercent,
+  type SessionBaseline,
+  type SessionMetrics,
+  type SessionStatsSummary,
+} from '../../../../shared/statsMath'
 
 export type SessionDialogVariant = 'stop' | 'goal' | 'end'
 
@@ -7,6 +13,13 @@ export interface SessionDialogProps {
   progressPercent: number
   wordsRead: number
   totalWords?: number
+  /**
+   * The finished session's own numbers and the baseline they read against
+   * (ADR-0035 §6). Null when nothing was recorded — a zero-word run, an
+   * unstored text, or a host that does not raise this dialog at all — and the
+   * block is then omitted rather than shown as zeroes.
+   */
+  sessionStats?: SessionStatsSummary | null
   onSaveExit: () => void
   onExitWithoutSaving: () => void
   onAbort: () => void
@@ -42,11 +55,143 @@ function clampPercent(value: number): number {
   return Math.max(0, Math.min(100, Math.round(value)))
 }
 
+/** One metric tile in the session block: a number, and how it compares. */
+interface SessionStatRow {
+  key: string
+  label: string
+  value: string
+  /**
+   * Signed whole-percent deviation against the baseline, or null when there is
+   * no baseline, none can be expressed (a zero baseline), or the difference
+   * rounds away — a "▲ 0%" is noise, not feedback.
+   */
+  deviation: number | null
+}
+
+/**
+ * `1h 4m 30s` / `12m 30s` / `45s`. Deliberately a local formatter: the same
+ * shape exists in `engine/videoRenderer.ts`, but that module pulls the MP4
+ * muxer in with it, which has no business in a reader dialog.
+ */
+function formatDuration(ms: number): string {
+  const totalSeconds = Math.max(0, Math.round(ms / 1000))
+  const hours = Math.floor(totalSeconds / 3600)
+  const minutes = Math.floor((totalSeconds % 3600) / 60)
+  const seconds = totalSeconds % 60
+  if (hours > 0) return `${hours}h ${minutes}m ${seconds}s`
+  if (minutes > 0) return `${minutes}m ${seconds}s`
+  return `${seconds}s`
+}
+
+function roundedDeviation(value: number, baselineValue: number): number | null {
+  const percent = deviationPercent(value, baselineValue)
+  if (percent === null) return null
+  const rounded = Math.round(percent)
+  return rounded === 0 ? null : rounded
+}
+
+/** The six §2 metrics, in the order they are read: what, how long, how well. */
+function buildStatRows({ metrics, baseline }: SessionStatsSummary): SessionStatRow[] {
+  const deviationOf = (pick: (source: SessionMetrics) => number): number | null =>
+    baseline ? roundedDeviation(pick(metrics), pick(baseline)) : null
+
+  return [
+    {
+      key: 'words',
+      label: 'Words',
+      value: Math.round(metrics.wordsRead).toLocaleString(),
+      deviation: deviationOf((source) => source.wordsRead),
+    },
+    {
+      key: 'duration',
+      label: 'Duration',
+      value: formatDuration(metrics.wallMs),
+      deviation: deviationOf((source) => source.wallMs),
+    },
+    {
+      key: 'wpm',
+      label: 'Speed',
+      value: `${Math.round(metrics.wpm).toLocaleString()} wpm`,
+      deviation: deviationOf((source) => source.wpm),
+    },
+    {
+      key: 'pauses',
+      label: 'Pauses',
+      value: Math.round(metrics.pauses).toLocaleString(),
+      deviation: deviationOf((source) => source.pauses),
+    },
+    {
+      key: 'rewinds',
+      label: 'Rewinds',
+      value: Math.round(metrics.rewinds).toLocaleString(),
+      deviation: deviationOf((source) => source.rewinds),
+    },
+    {
+      key: 'fluency',
+      label: 'Fluency',
+      value: String(Math.round(metrics.fluency)),
+      deviation: deviationOf((source) => source.fluency),
+    },
+  ]
+}
+
+/** Says what the arrows are measured against, so the block explains itself. */
+function baselineCaption(baseline: SessionBaseline): string {
+  if (baseline.source === 'today') {
+    return baseline.sessionCount === 1
+      ? 'vs your earlier session today'
+      : `vs your ${baseline.sessionCount} earlier sessions today`
+  }
+  return 'vs your last reading day'
+}
+
+/**
+ * The session block (ADR-0035 §6). Deviations are **informational**, never
+ * moralizing: more pauses is not a failure and more words is not a victory, so
+ * the indicators carry no `--danger`/success role (ADR-0012) — only a direction
+ * and a size.
+ */
+function SessionStatsBlock({ stats }: { stats: SessionStatsSummary | null }) {
+  // The nothing-recorded case is answered here rather than in the dialog body:
+  // a zero-word run has no session numbers, and zeroes would be a lie.
+  if (!stats) return null
+  const rows = buildStatRows(stats)
+
+  return (
+    <div className="session-dialog-stats">
+      <div className="session-dialog-stats-head">
+        <span className="session-dialog-stats-title">This session</span>
+        {stats.baseline && (
+          <span className="session-dialog-stats-baseline">{baselineCaption(stats.baseline)}</span>
+        )}
+      </div>
+      <div className="session-dialog-stats-grid">
+        {rows.map((row) => (
+          <div key={row.key} className="session-dialog-stat">
+            <span className="session-dialog-stat-label">{row.label}</span>
+            <span className="session-dialog-stat-value">{row.value}</span>
+            {row.deviation !== null && (
+              <span
+                className="session-dialog-stat-deviation"
+                role="img"
+                aria-label={`${row.deviation > 0 ? 'up' : 'down'} ${Math.abs(row.deviation)} percent`}
+              >
+                {`${row.deviation > 0 ? '▲' : '▼'} ${Math.abs(row.deviation)}%`}
+              </span>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 export default function SessionDialog({
   variant,
   progressPercent,
   wordsRead,
   totalWords,
+  sessionStats = null,
   onSaveExit,
   onExitWithoutSaving,
   onAbort,
@@ -223,6 +368,8 @@ export default function SessionDialog({
             <span className="session-dialog-progress-value">{wordsLabel}</span>
           </div>
         </div>
+
+        <SessionStatsBlock stats={sessionStats} />
 
         <div className="session-dialog-actions">
           {actions.map((action) => (

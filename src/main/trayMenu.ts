@@ -1,31 +1,7 @@
-import { Menu, Tray, type MenuItemConstructorOptions } from 'electron'
+import { Menu, Tray } from 'electron'
+import type { TrayMenuItem } from './trayMenuTemplate'
 
-export function buildTrayMenuTemplate(options: {
-  rwwEnabled: boolean
-  onShow: () => void
-  onStartReadWhileWorking: () => void
-  onExitReadWhileWorking: () => void
-  onQuit: () => void
-}): MenuItemConstructorOptions[] {
-  const template: MenuItemConstructorOptions[] = [
-    { label: 'Show WingletReader', click: () => options.onShow() }
-  ]
-  if (options.rwwEnabled) {
-    template.push({
-      label: 'Exit Overlay Reader',
-      click: () => options.onExitReadWhileWorking()
-    })
-  } else {
-    template.push({
-      label: 'Start Overlay Reader',
-      click: () => options.onStartReadWhileWorking()
-    })
-  }
-  template.push({ label: 'Quit', click: () => options.onQuit() })
-  return template
-}
-
-export function createTrayMenu(template: MenuItemConstructorOptions[]): Menu {
+export function createTrayMenu(template: TrayMenuItem[]): Menu {
   return Menu.buildFromTemplate(template)
 }
 

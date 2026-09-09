@@ -29,6 +29,9 @@ export const STANDBY_PILL_WINDOW = {
   margin: 16
 }
 
+export const MAIN_WINDOW_FADE_MS = 180
+export const MAIN_WINDOW_FADE_INTERVAL_MS = 16
+
 export interface WorkAreaBounds {
   x: number
   y: number
@@ -42,6 +45,19 @@ export function shouldShowStandbyPill(options: {
   showStandbyControl: boolean
 }): boolean {
   return options.enabled && options.registered && options.showStandbyControl
+}
+
+// Ease-in (t^2). Returns the opacity to apply, or null meaning the fade is
+// complete and the caller should hide the window.
+export function fadeOutOpacityAt(
+  elapsedMs: number,
+  durationMs = MAIN_WINDOW_FADE_MS
+): number | null {
+  const safeDurationMs = Number.isFinite(durationMs) && durationMs > 0 ? durationMs : MAIN_WINDOW_FADE_MS
+  const safeElapsedMs = Number.isFinite(elapsedMs) ? elapsedMs : 0
+  const progress = Math.max(0, Math.min(1, safeElapsedMs / safeDurationMs))
+  if (progress >= 1) return null
+  return 1 - progress * progress
 }
 
 const MODIFIER_ALIASES: Record<string, string> = {

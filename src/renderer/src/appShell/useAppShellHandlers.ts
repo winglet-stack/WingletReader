@@ -1,5 +1,6 @@
 import { useCallback } from 'react'
-import type { AppView, Settings } from '../types'
+import type { Settings } from '../types'
+import type { AppView } from './routeTable'
 
 export function useAppShellHandlers(options: {
   saveSettings: (patch: Partial<Settings>) => Promise<void>

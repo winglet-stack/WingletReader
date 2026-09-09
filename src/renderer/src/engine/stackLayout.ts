@@ -70,6 +70,7 @@ export function nextRevealState(
 /**
  * Build the 2D display grid for the current block.
  * Past rows show all slots; the current row is cut at revealUpToSlot.
+ * Future rows contain only null slots so they reserve space without displaying content.
  * Out-of-bounds stack positions map to null.
  */
 export function buildDisplayRows(
@@ -77,9 +78,14 @@ export function buildDisplayRows(
   blockStart: number,
   currentLineIdx: number,
   stacksVisible: number,
-  revealUpToSlot: number
+  revealUpToSlot: number,
+  linesCount: number
 ): (WordStack | null)[][] {
-  return Array.from({ length: currentLineIdx + 1 }, (_, rowIdx) => {
+  return Array.from({ length: linesCount }, (_, rowIdx) => {
+    if (rowIdx > currentLineIdx) {
+      return Array.from({ length: stacksVisible }, () => null)
+    }
+
     const rowStart = blockStart + rowIdx * stacksVisible
     const isCurrentRow = rowIdx === currentLineIdx
     return Array.from({ length: stacksVisible }, (_, colIdx) => {

@@ -1,4 +1,5 @@
-import React, { useEffect, useRef, useState } from 'react'
+import React from 'react'
+import { useDraftValue } from '../hooks/useDraftValue'
 
 interface NumericInputProps {
   value: number
@@ -29,13 +30,6 @@ export default function NumericInput({
   className = 'form-input form-input-sm',
   style
 }: NumericInputProps) {
-  const [draft, setDraft] = useState(String(value))
-  const focusedRef = useRef(false)
-
-  useEffect(() => {
-    if (!focusedRef.current) setDraft(String(value))
-  }, [value])
-
   const parse = (raw: string) => {
     if (raw.trim() === '' || raw === '-') return null
     const parsed = Number(raw)
@@ -49,6 +43,8 @@ export default function NumericInput({
     setDraft(String(next))
   }
 
+  const { draft, setDraft, onFocus, onBlur, onKeyDown } = useDraftValue(value, commit)
+
   return (
     <input
       id={id}
@@ -61,7 +57,7 @@ export default function NumericInput({
       disabled={disabled}
       aria-label={ariaLabel}
       style={style}
-      onFocus={() => { focusedRef.current = true }}
+      onFocus={onFocus}
       onChange={(e) => {
         const next = e.target.value
         setDraft(next)
@@ -70,17 +66,8 @@ export default function NumericInput({
           onCommit(Math.round(parsed))
         }
       }}
-      onBlur={() => {
-        focusedRef.current = false
-        commit(draft)
-      }}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter') e.currentTarget.blur()
-        if (e.key === 'Escape') {
-          setDraft(String(value))
-          e.currentTarget.blur()
-        }
-      }}
+      onBlur={onBlur}
+      onKeyDown={onKeyDown}
     />
   )
 }

@@ -28,6 +28,11 @@ export function registerMainProcessCrashLogging(
   logger: CrashLogger = log,
   terminate: CrashTerminator = (exitCode) => process.exit(exitCode)
 ): void {
+  // Asymmetry is deliberate: after an uncaughtException main's state is unknown,
+  // so exit. An unhandledRejection is logged but NOT fatal — the JSON store is
+  // durable per-mutation (database.ts writes tmp-then-rename on every save), so
+  // fail-fast protects nothing, while killing an alpha session costs the tester
+  // feedback the alpha exists to collect.
   target.on('uncaughtException', (error, origin) => {
     logger.error(
       `[runtime] uncaughtException (${origin})\n${formatCrashReason(error)}`
@@ -40,7 +45,5 @@ export function registerMainProcessCrashLogging(
     logger.error(
       `[runtime] unhandledRejection\n${formatCrashReason(reason)}`
     )
-    process.exitCode = 1
-    terminate(1)
   })
 }

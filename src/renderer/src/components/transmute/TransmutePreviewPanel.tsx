@@ -1,9 +1,9 @@
 import React, { useEffect, useMemo, useRef } from 'react'
-import type { TransmuteConfig } from '../../types'
+import type { TransmuteConfig, WordStack } from '../../types'
 import {
   buildStacksForTransmute,
+  buildVideoPreviewFrame,
   drawFrame,
-  frameBatchSize,
   resolutionDimensions
 } from '../../engine/videoRenderer'
 import { resolutionLabel } from '../../engine/transmuteWizard'
@@ -13,6 +13,9 @@ const PREVIEW_TEXT =
 
 const MAX_PW = 300
 const MAX_PH = 380
+
+/** Shown when the configured content limit leaves nothing to preview. */
+const FALLBACK_STACKS: WordStack[] = [{ words: ['Lorem', 'ipsum'], type: 'normal' }]
 
 interface Props {
   config: TransmuteConfig
@@ -30,16 +33,6 @@ export default function TransmutePreviewPanel({ config, estimate }: Props) {
       config.chunkRuleBullets, config.chunkRuleCommas, config.chunkRuleNames]
   )
 
-  // Build the batch of stacks to show in a single preview frame
-  const previewBatchSize = frameBatchSize(config)
-  const previewBatch = useMemo(
-    () =>
-      previewStacks
-        .slice(0, previewBatchSize)
-        .map((s) => ({ words: s.words, isHeadline: s.type === 'headline' })),
-    [previewStacks, previewBatchSize]
-  )
-
   // Compute preview frame dimensions
   const { width: vw, height: vh } = useMemo(
     () => resolutionDimensions(config.resolution),
@@ -49,20 +42,24 @@ export default function TransmutePreviewPanel({ config, estimate }: Props) {
   const previewW = Math.round(vw * previewScale)
   const previewH = Math.round(vh * previewScale)
 
-  // Redraw the preview canvas whenever visually-relevant config or preview batch changes
+  // Redraw the preview canvas whenever visually-relevant config or stacks change.
+  // The preview is a painter over the same reader frame the exporter uses; it only
+  // asks for the still beat where the line box is full.
   useEffect(() => {
     const canvas = previewCanvasRef.current
     if (!canvas) return
     const ctx = canvas.getContext('2d')
     if (!ctx) return
-    const batch =
-      previewBatch.length > 0
-        ? previewBatch
-        : [{ words: ['Lorem', 'ipsum'], isHeadline: false }]
-    drawFrame(ctx, batch, config, vw, vh, config.showProgressOverlay ? 0.5 : undefined)
+    const stacks = previewStacks.length > 0 ? previewStacks : FALLBACK_STACKS
+    drawFrame(
+      ctx,
+      buildVideoPreviewFrame({ ctx, stacks, config, width: vw, height: vh }),
+      config,
+      config.showProgressOverlay ? 0.5 : undefined
+    )
   }, [
     config,
-    previewBatch,
+    previewStacks,
     vw,
     vh
   ])

@@ -1,4 +1,5 @@
-import React, { useEffect, useRef, useState } from 'react'
+import React from 'react'
+import { useDraftValue } from '../../../hooks/useDraftValue'
 
 /**
  * Optional non-linear mapping between a setting's *domain* value (e.g. a BPM) and
@@ -83,14 +84,6 @@ export default function SliderField({
   const persist = onPersist ?? onLiveSet
   const clamp = clampValue ?? ((v: number) => defaultClamp(v, min, max))
 
-  // Numeric draft is mirrored from the live value unless the box is focused, so
-  // an in-flight edit isn't clobbered by upstream re-renders.
-  const [draft, setDraft] = useState(String(value))
-  const focusedRef = useRef(false)
-  useEffect(() => {
-    if (!focusedRef.current) setDraft(String(value))
-  }, [value])
-
   // Map a raw <input type="range"> value to the domain space.
   const sliderToValue = (raw: number): number =>
     transform ? transform.fromSlider(raw) : raw
@@ -105,6 +98,18 @@ export default function SliderField({
     const parsed = Number(raw)
     return Number.isFinite(parsed) ? parsed : null
   }
+
+  const commit = (raw: string) => {
+    const parsed = parse(raw)
+    const committed = parsed === null ? value : clamp(parsed)
+    onLiveSet(committed)
+    persist(committed)
+    setDraft(String(committed))
+  }
+
+  // Numeric draft is mirrored from the live value unless the box is focused, so
+  // an in-flight edit isn't clobbered by upstream re-renders.
+  const { draft, setDraft, onFocus, onBlur, onKeyDown } = useDraftValue(value, commit)
 
   return (
     <div className={className}>
@@ -137,9 +142,7 @@ export default function SliderField({
         value={draft}
         aria-label={numericAriaLabel ?? `${label} value`}
         disabled={disabled}
-        onFocus={() => {
-          focusedRef.current = true
-        }}
+        onFocus={onFocus}
         onChange={(e) => {
           const next = e.target.value
           setDraft(next)
@@ -147,21 +150,8 @@ export default function SliderField({
           // Live-preview only while the value is in range; commit happens on blur.
           if (parsed !== null && parsed >= min && parsed <= max) onLiveSet(clamp(parsed))
         }}
-        onBlur={() => {
-          focusedRef.current = false
-          const parsed = parse(draft)
-          const committed = parsed === null ? value : clamp(parsed)
-          onLiveSet(committed)
-          persist(committed)
-          setDraft(String(committed))
-        }}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter') e.currentTarget.blur()
-          if (e.key === 'Escape') {
-            setDraft(String(value))
-            e.currentTarget.blur()
-          }
-        }}
+        onBlur={onBlur}
+        onKeyDown={onKeyDown}
       />
     </div>
   )

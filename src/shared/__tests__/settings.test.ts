@@ -1,14 +1,70 @@
 import { describe, it, expect } from 'vitest'
-import { DEFAULT_SETTINGS, parseSettings } from '../settings'
+import {
+  DEFAULT_SETTINGS,
+  effectiveLinesCount,
+  linesCountPatch,
+  parseSettings,
+  resolvedLinesAnchor,
+} from '../settings'
+
+describe('line count helpers', () => {
+  it('migrates legacy disabled/count data to one effective line without mutating input', () => {
+    const stored = { lines_enabled: false, lines_count: 3 }
+    const parsed = parseSettings(stored)
+
+    expect(effectiveLinesCount(parsed)).toBe(1)
+    expect(parsed.lines_count).toBe(1)
+    expect('lines_enabled' in parsed).toBe(false)
+    expect(stored).toEqual({ lines_enabled: false, lines_count: 3 })
+  })
+
+  it.each([0, -2])('clamps a count below one (%s) to one', (lines_count) => {
+    expect(effectiveLinesCount({ lines_count })).toBe(1)
+  })
+
+  it('returns counts unchanged when they are at least one', () => {
+    expect(effectiveLinesCount({ lines_count: 1 })).toBe(1)
+    expect(effectiveLinesCount({ lines_count: 3 })).toBe(3)
+  })
+
+  it('writes only the count', () => {
+    expect(linesCountPatch(1)).toEqual({ lines_count: 1 })
+    expect(linesCountPatch(3)).toEqual({ lines_count: 3 })
+  })
+
+  it('defaults a missing anchor to center without mutating legacy input', () => {
+    const stored = { lines_count: 3 }
+
+    expect(resolvedLinesAnchor(stored)).toBe('center')
+    expect(stored).toEqual({ lines_count: 3 })
+  })
+
+  it('keeps top inert at one line while preserving the stored choice for later', () => {
+    const stored = { lines_count: 1, lines_anchor: 'top' as const }
+
+    expect(resolvedLinesAnchor(stored)).toBe('center')
+    expect(stored.lines_anchor).toBe('top')
+
+    stored.lines_count = 3
+    expect(resolvedLinesAnchor(stored)).toBe('top')
+  })
+})
 
 describe('parseSettings', () => {
+  it('hydrates a missing lines_anchor as center without writing into the source object', () => {
+    const stored = { lines_count: 3 }
+
+    expect(parseSettings(stored).lines_anchor).toBe('center')
+    expect('lines_anchor' in stored).toBe(false)
+  })
+
   it('returns defaults for all required fields when given an empty object', () => {
     const result = parseSettings({})
     // rww inherit keys (rww_bpm, rww_words_per_stack, etc.) are intentionally
     // absent when not in the stored data — they fall back via ?? at the call site.
     const requiredDefaults = Object.fromEntries(
       Object.entries(DEFAULT_SETTINGS).filter(
-        ([k]) => !['rww_bpm', 'rww_words_per_stack', 'rww_stacks_visible', 'rww_lines_enabled', 'rww_lines_count', 'rww_font_size'].includes(k)
+        ([k]) => !['rww_bpm', 'rww_words_per_stack', 'rww_stacks_visible', 'rww_lines_count', 'rww_font_size'].includes(k)
       )
     )
     expect(result).toEqual(requiredDefaults)
@@ -61,9 +117,8 @@ describe('parseSettings', () => {
     // rww inherit keys are absent when not supplied (intentional — they fall back
     // via ?? to the main-reader setting at the call site)
     expect('rww_bpm' in result).toBe(false)
-    expect('rww_lines_enabled' in result).toBe(false)
     // all other DEFAULT_SETTINGS keys are present
-    const rwwInheritKeys = new Set(['rww_bpm', 'rww_words_per_stack', 'rww_stacks_visible', 'rww_lines_enabled', 'rww_lines_count', 'rww_font_size'])
+    const rwwInheritKeys = new Set(['rww_bpm', 'rww_words_per_stack', 'rww_stacks_visible', 'rww_lines_count', 'rww_font_size'])
     const expectedKeys = Object.keys(DEFAULT_SETTINGS).filter(k => !rwwInheritKeys.has(k))
     expect(Object.keys(result).sort()).toEqual(expectedKeys.sort())
   })

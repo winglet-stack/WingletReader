@@ -2,8 +2,16 @@ import React, { useState } from 'react'
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { render, screen, fireEvent, cleanup, act } from '@testing-library/react'
 import Reader from '../components/Reader'
-import { useReadingSessionLifecycle } from '../hooks/useReadingSessionLifecycle'
-import type { Bookmark, PlaybackState, Settings, TextRecord, WordStack } from '../types'
+import { useReadingSession, type ReadingSession } from '../hooks/useReadingSession'
+import {
+  GAP_CLAMP_FLOOR_MS,
+  PAUSE_EXEMPTION_WINDOW_MS,
+  fluencyScore,
+  interruptionRate,
+  maxCreditedGapMs,
+  measuredWpm,
+} from '../../../shared/statsMath'
+import type { Bookmark, SessionStatsRecord, Settings, TextRecord } from '../types'
 import { NavigationProvider } from '../contexts/NavigationContext'
 import { SettingsProvider } from '../contexts/SettingsContext'
 import { LibraryProvider } from '../contexts/LibraryContext'
@@ -52,6 +60,7 @@ function stubApi(
         })
       ),
       deleteBookmark: vi.fn().mockResolvedValue(undefined),
+      recordSessionStats: vi.fn().mockResolvedValue(undefined),
     },
   }
   vi.stubGlobal('api', api)
@@ -71,7 +80,6 @@ const BASE_SETTINGS: Settings = {
   stack_horizontal_offset: 0,
   theme: 'dark',
   highlight_active: false,
-  lines_enabled: false,
   lines_count: 1,
   lines_row_gap: 0,
   segmentation_enabled: false,
@@ -106,6 +114,13 @@ const BASE_SETTINGS: Settings = {
   custom_reader_configs: [],
 }
 
+/**
+ * Tap-to-read: playback schedules no beat timer, so the index moves only when
+ * the test taps (`session().step()`) — the mode ADR-0036 §3's gap clamp exists
+ * for, since an idle tap session otherwise sits in `playing` forever.
+ */
+const TAP_SETTINGS: Settings = { ...BASE_SETTINGS, tap_to_read: true }
+
 const TWELVE_WORDS = 'one two three four five six seven eight nine ten eleven twelve'
 
 const SESSION_TEXT: TextRecord = {
@@ -128,7 +143,7 @@ function renderReader(
     onBack?: () => void
     onExitToLibrary?: () => void
     backLabel?: string
-    sessionEndEnabled?: boolean
+    completion?: 'session-dialog' | 'host-completion'
   } = {}
 ) {
   render(
@@ -140,7 +155,7 @@ function renderReader(
               onBack={opts.onBack ?? vi.fn()}
               onExitToLibrary={opts.onExitToLibrary ?? vi.fn()}
               backLabel={opts.backLabel}
-              sessionEndEnabled={opts.sessionEndEnabled}
+              completion={opts.completion}
             />
           </ReaderProvider>
         </LibraryProvider>
@@ -149,92 +164,65 @@ function renderReader(
   )
 }
 
-const SESSION_STACKS: WordStack[] = [
-  { words: ['one', 'two'], type: 'normal' },
-  { words: ['three', 'four'], type: 'normal' },
-  { words: ['five', 'six'], type: 'normal' },
-  { words: ['seven', 'eight'], type: 'normal' },
-  { words: ['nine', 'ten'], type: 'normal' },
-  { words: ['eleven', 'twelve'], type: 'normal' },
-]
+const HARNESS_GOAL: Bookmark = {
+  id: 44,
+  textId: 7,
+  kind: 'goal',
+  wordOffset: 4,
+  label: 'Harness target',
+  createdAt: '2026-07-13T00:00:00.000Z',
+}
 
-function renderLifecycleHarness() {
-  function Harness() {
-    const [currentIndex, setCurrentIndex] = useState(0)
-    const [playState, setPlayState] = useState<PlaybackState>('idle')
-    const [manualSeekRevision, setManualSeekRevision] = useState(0)
-    const [naturalEndRevision, setNaturalEndRevision] = useState(0)
-    const [goalBookmark, setGoalBookmark] = useState<Bookmark | null>(null)
-    const lifecycle = useReadingSessionLifecycle({
+/**
+ * Drive the reading-session interface directly.
+ *
+ * This replaces the hand-written fake Reader that stood here until
+ * `architecture-depth/12`: ~70 lines of test-only coordination over a fake
+ * playback engine, which existed because the state machine had no interface a
+ * test could hold. It now has one, so the suite holds *that* — the same intents
+ * the real Reader calls, over the real playback engine on fake timers
+ * (BASE_SETTINGS' 120 BPM makes one beat 500 ms across six stacks).
+ *
+ * The only thing the fixture still owns is the Target, because the session
+ * deletes it from the store and reports the consumption back — exactly as the
+ * Reader's bookmark collection receives it.
+ */
+function renderSessionInterface(
+  initialGoal: Bookmark | null = null,
+  initialSettings: Settings = BASE_SETTINGS
+) {
+  const held = { current: null as ReadingSession | null }
+  const control = { apply: (_next: Settings) => {} }
+
+  function Probe() {
+    const [goalBookmark, setGoalBookmark] = useState<Bookmark | null>(initialGoal)
+    const [settings, setSettings] = useState<Settings>(initialSettings)
+    control.apply = setSettings
+    held.current = useReadingSession({
       text: SAVED_TEXT,
-      stacks: SESSION_STACKS,
-      currentIndex,
-      playState,
+      settings,
       segmentCtx: undefined,
-      resumeFromIndex: null,
+      completion: 'session-dialog',
       rereReadEndIndex: null,
       goalBookmark,
-      manualSeekRevision,
-      naturalEndRevision,
-      play: () => {
-        setCurrentIndex(0)
-        setPlayState('playing')
-      },
-      playFrom: (index) => {
-        setCurrentIndex(index)
-        setPlayState('playing')
-      },
-      pause: () => setPlayState('paused'),
-      stop: () => setPlayState('stopped'),
-      pauseAndHold: () => setPlayState('paused'),
-      discardToStart: () => {
-        setCurrentIndex(0)
-        setPlayState('stopped')
-      },
+      resumeFromIndex: null,
+      resumeFromWordOffset: null,
       onGoalBookmarkConsumed: (bookmarkId) => {
-        setGoalBookmark((current) => current?.id === bookmarkId ? null : current)
+        setGoalBookmark((current) => (current?.id === bookmarkId ? null : current))
       },
       refreshResumeCandidate: () => {},
     })
-
-    return (
-      <div>
-        <button type="button" onClick={lifecycle.handlePlay}>play</button>
-        <button type="button" onClick={lifecycle.handleResume}>resume saved</button>
-        <button type="button" onClick={() => setCurrentIndex(4)}>index 4</button>
-        <button type="button" onClick={() => setCurrentIndex(5)}>index 5</button>
-        <button type="button" onClick={() => setPlayState('paused')}>pause</button>
-        <button type="button" onClick={() => setPlayState('playing')}>resume live</button>
-        <button type="button" onClick={lifecycle.stopReading}>stop reading</button>
-        <button type="button" onClick={() => {
-          setCurrentIndex(2)
-          setManualSeekRevision((revision) => revision + 1)
-        }}>seek index 2</button>
-        <button type="button" onClick={() => {
-          setCurrentIndex(SESSION_STACKS.length)
-          setPlayState('paused')
-          setNaturalEndRevision((revision) => revision + 1)
-        }}>natural end</button>
-        <button type="button" onClick={() => {
-          setGoalBookmark({
-            id: 44,
-            textId: 7,
-            kind: 'goal',
-            wordOffset: 4,
-            label: 'Harness target',
-            createdAt: '2026-07-13T00:00:00.000Z',
-          })
-        }}>set goal</button>
-        <button type="button" onClick={() => { void lifecycle.commitCurrentPosition() }}>commit</button>
-        <button type="button" onClick={() => { void lifecycle.revertToBaseline() }}>revert</button>
-        <span data-testid="play-state">{playState}</span>
-        <span data-testid="current-index">{currentIndex}</span>
-        <span data-testid="session-end">{lifecycle.sessionEnd?.reason ?? 'none'}</span>
-      </div>
-    )
+    return null
   }
 
-  render(<Harness />)
+  const { unmount } = render(<Probe />)
+  // Callable exactly as before; `unmount` lets the stats tests leave the
+  // Reader, and `editSettings` lets them change a live setting mid-session
+  // (BPM is live-editable, and the ADR-0036 §3 gap clamp follows it).
+  return Object.assign(() => held.current as ReadingSession, {
+    unmount,
+    editSettings: (patch: Partial<Settings>) => control.apply({ ...initialSettings, ...patch }),
+  })
 }
 
 describe('Reader session - countdown to playFrom', () => {
@@ -1160,7 +1148,7 @@ describe('Reader session - bookmarks at current position', () => {
     expect(Number(scrubber.value)).toBe(0)
   })
 
-  it('does not mount the Target dialog when the Reader host disables session ends', async () => {
+  it('does not mount the Target dialog when the host owns completion', async () => {
     vi.useFakeTimers()
     const api = stubApi(null, [
       {
@@ -1173,7 +1161,7 @@ describe('Reader session - bookmarks at current position', () => {
       },
     ])
 
-    renderReader(SAVED_TEXT, null, { sessionEndEnabled: false })
+    renderReader(SAVED_TEXT, null, { completion: 'host-completion' })
     await act(async () => {})
 
     act(() => { fireEvent.click(screen.getByRole('button', { name: 'Play' })) })
@@ -1257,143 +1245,165 @@ describe('Reader session - bookmarks at current position', () => {
 
 describe('Reader session - session baseline actions', () => {
   it('commits the current playhead and reverts to the start baseline for a fresh play session', async () => {
+    vi.useFakeTimers()
     const api = stubApi(null)
 
-    renderLifecycleHarness()
+    const session = renderSessionInterface()
     await act(async () => {})
 
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'play' }))
-    })
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'index 4' }))
-    })
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'commit' }))
-    })
+    act(() => { session().play() })
+    await act(async () => { vi.advanceTimersByTime(2000) })
+    expect(session().currentIndex).toBe(4)
 
+    await act(async () => { await session().commit() })
     expect(api.db.saveReadingPosition).toHaveBeenLastCalledWith(7, 4, 'text')
 
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'revert' }))
-    })
+    // Discard is only ever reached from a held (paused) session, as the Session
+    // dialog reaches it; pausing first also auto-saves 4, so the revert below is
+    // asserting ADR-0026 §3 — the one write that overrides the auto-save.
+    act(() => { session().pause() })
+    await act(async () => { await session().discard() })
 
     expect(api.db.saveReadingPosition).toHaveBeenLastCalledWith(7, 0, 'text')
   })
 
   it('captures the saved baseline on resume-from-saved and does not move it on pause/resume', async () => {
+    vi.useFakeTimers()
     const api = stubApi({ stackIndex: 2 })
 
-    renderLifecycleHarness()
+    const session = renderSessionInterface()
     await act(async () => {})
     await act(async () => {})
 
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'resume saved' }))
-    })
-    expect(screen.getByTestId('current-index').textContent).toBe('2')
+    act(() => { session().resumeSaved() })
+    expect(session().currentIndex).toBe(2)
 
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'index 4' }))
-    })
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'pause' }))
-    })
+    await act(async () => { vi.advanceTimersByTime(1000) })
+    act(() => { session().pause() })
+    expect(session().currentIndex).toBe(4)
     expect(api.db.saveReadingPosition).toHaveBeenLastCalledWith(7, 4, 'text')
 
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'resume live' }))
-    })
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'index 5' }))
-    })
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'revert' }))
-    })
+    act(() => { session().resume() })
+    await act(async () => { vi.advanceTimersByTime(500) })
+    act(() => { session().pause() })
+    expect(session().currentIndex).toBe(5)
+    expect(api.db.saveReadingPosition).toHaveBeenLastCalledWith(7, 5, 'text')
+
+    await act(async () => { await session().discard() })
 
     expect(api.db.saveReadingPosition).toHaveBeenLastCalledWith(7, 2, 'text')
   })
 
   it('raises stop sessionEnd, pauses, holds, and clears on resume and seek', async () => {
+    vi.useFakeTimers()
     stubApi(null)
 
-    renderLifecycleHarness()
+    const session = renderSessionInterface()
     await act(async () => {})
 
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'play' }))
-    })
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'index 4' }))
-    })
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'stop reading' }))
-    })
+    act(() => { session().play() })
+    await act(async () => { vi.advanceTimersByTime(2000) })
+    act(() => { session().stop() })
 
-    expect(screen.getByTestId('play-state').textContent).toBe('paused')
-    expect(screen.getByTestId('current-index').textContent).toBe('4')
-    expect(screen.getByTestId('session-end').textContent).toBe('stop')
+    expect(session().playState).toBe('paused')
+    expect(session().currentIndex).toBe(4)
+    expect(session().sessionEnd).toBe('stop')
 
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'resume live' }))
-    })
-    expect(screen.getByTestId('session-end').textContent).toBe('none')
+    await act(async () => { session().resume() })
+    expect(session().sessionEnd).toBeNull()
 
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'stop reading' }))
-    })
-    expect(screen.getByTestId('session-end').textContent).toBe('stop')
+    act(() => { session().stop() })
+    expect(session().sessionEnd).toBe('stop')
 
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'seek index 2' }))
-    })
-    expect(screen.getByTestId('current-index').textContent).toBe('2')
-    expect(screen.getByTestId('session-end').textContent).toBe('none')
+    await act(async () => { session().seekTo(2) })
+    expect(session().currentIndex).toBe(2)
+    expect(session().sessionEnd).toBeNull()
   })
 
   it('raises goal sessionEnd and preserves goal self-deletion on crossing', async () => {
+    vi.useFakeTimers()
     const api = stubApi(null)
 
-    renderLifecycleHarness()
+    const session = renderSessionInterface(HARNESS_GOAL)
     await act(async () => {})
 
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'set goal' }))
-    })
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'play' }))
-    })
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'index 4' }))
-    })
+    act(() => { session().play() })
+    await act(async () => { vi.advanceTimersByTime(1000) })
     await act(async () => {})
 
     expect(api.db.deleteBookmark).toHaveBeenCalledWith(44)
-    expect(screen.getByTestId('play-state').textContent).toBe('paused')
-    expect(screen.getByTestId('current-index').textContent).toBe('4')
-    expect(screen.getByTestId('session-end').textContent).toBe('goal')
+    expect(session().playState).toBe('paused')
+    expect(session().currentIndex).toBe(2)
+    expect(session().sessionEnd).toBe('goal')
+    expect(session().goalStackIndex).toBeNull()
   })
 
   it('raises end sessionEnd when natural finish reports from playback', async () => {
+    vi.useFakeTimers()
     stubApi(null)
 
-    renderLifecycleHarness()
+    const session = renderSessionInterface()
     await act(async () => {})
 
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'play' }))
-    })
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'index 5' }))
-    })
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'natural end' }))
-    })
+    act(() => { session().play() })
+    await act(async () => { vi.advanceTimersByTime(3500) })
     await act(async () => {})
 
-    expect(screen.getByTestId('play-state').textContent).toBe('paused')
-    expect(screen.getByTestId('current-index').textContent).toBe('6')
-    expect(screen.getByTestId('session-end').textContent).toBe('end')
+    expect(session().playState).toBe('paused')
+    expect(session().currentIndex).toBe(6)
+    expect(session().sessionEnd).toBe('end')
+  })
+})
+
+describe('Reader surfaces - one owner, one open surface', () => {
+  it('walks quick settings, bookmarks, the drawer, the text view and browse with only one ever open', async () => {
+    stubApi()
+
+    renderReader(SAVED_TEXT)
+    await act(async () => {})
+
+    act(() => { fireEvent.click(screen.getByRole('button', { name: 'Quick settings' })) })
+    expect(screen.getByRole('dialog', { name: 'Quick settings' })).toBeTruthy()
+
+    openBookmarkPopover()
+    expect(screen.queryByRole('dialog', { name: 'Quick settings' })).toBeNull()
+    expect(screen.getByRole('dialog', { name: 'Bookmarks' })).toBeTruthy()
+
+    // The drawer's only opener is Quick Settings' footer, so it comes back up
+    // first — which itself closes the popover.
+    act(() => { fireEvent.click(screen.getByRole('button', { name: 'Quick settings' })) })
+    expect(screen.queryByRole('dialog', { name: 'Bookmarks' })).toBeNull()
+    act(() => { fireEvent.click(screen.getByRole('button', { name: /see more settings/i })) })
+    expect(screen.getByRole('complementary', { name: 'Reader settings' })).toBeTruthy()
+
+    // The pairing no handler used to enforce: the popovers and the drawer share
+    // one slot now.
+    openBookmarkPopover()
+    expect(screen.queryByRole('complementary', { name: 'Reader settings' })).toBeNull()
+
+    act(() => { fireEvent.click(screen.getByRole('button', { name: 'Plain text view' })) })
+    expect(screen.queryByRole('dialog', { name: 'Bookmarks' })).toBeNull()
+    expect(screen.getByRole('region', { name: 'Text view' })).toBeTruthy()
+
+    act(() => { fireEvent.click(screen.getByRole('button', { name: 'Browse library' })) })
+    expect(screen.queryByRole('region', { name: 'Text view' })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Back to reading' })).toBeTruthy()
+  })
+
+  it('pauses playback when the in-frame library browse takes the stage (ADR-0013)', async () => {
+    vi.useFakeTimers()
+    stubApi()
+
+    renderReader(SAVED_TEXT)
+    await act(async () => {})
+
+    act(() => { fireEvent.click(screen.getByRole('button', { name: 'Play' })) })
+    await act(async () => { vi.advanceTimersByTime(1000) })
+    expect(screen.getByRole('button', { name: 'Pause' })).toBeTruthy()
+
+    act(() => { fireEvent.click(screen.getByRole('button', { name: 'Browse library' })) })
+
+    expect(screen.getByRole('button', { name: 'Resume' })).toBeTruthy()
   })
 })
 
@@ -1449,6 +1459,32 @@ describe('Reader session - save-position transitions', () => {
     const scrubber = screen.getByRole('slider', { name: 'Reading position' }) as HTMLInputElement
     expect(Number(scrubber.value)).toBe(3)
     expect(api.db.saveReadingPosition).toHaveBeenCalledWith(7, 3, 'text')
+  })
+
+  it('restarts mid-session from one intent, with no paired call at the call site', async () => {
+    vi.useFakeTimers()
+    stubApi({ stackIndex: 2 })
+
+    renderReader(SAVED_TEXT)
+    await act(async () => {})
+
+    act(() => {
+      fireEvent.click(screen.getByRole('button', { name: 'Resume from saved position' }))
+    })
+    await act(async () => { vi.advanceTimersByTime(1000) })
+
+    const scrubber = screen.getByRole('slider', { name: 'Reading position' }) as HTMLInputElement
+    expect(Number(scrubber.value)).toBe(4)
+
+    // One click, one intent: the session's start and the playhead both reset.
+    // This used to need the lifecycle half and the playback half, in order.
+    act(() => { fireEvent.click(screen.getByRole('button', { name: 'Restart' })) })
+
+    expect(Number(scrubber.value)).toBe(0)
+    expect(screen.getByRole('button', { name: 'Pause' })).toBeTruthy()
+
+    await act(async () => { vi.advanceTimersByTime(1000) })
+    expect(Number(scrubber.value)).toBe(2)
   })
 
   it('opens the Stop dialog, aborts in place, and keeps the held playhead paused', async () => {
@@ -1606,11 +1642,11 @@ describe('Reader session - save-position transitions', () => {
     expect(onExitToLibrary).not.toHaveBeenCalled()
   })
 
-  it('does not mount SessionDialog when the Reader host disables session ends', async () => {
+  it('does not mount SessionDialog when the host owns completion', async () => {
     vi.useFakeTimers()
     stubApi()
 
-    renderReader(SAVED_TEXT, null, { sessionEndEnabled: false })
+    renderReader(SAVED_TEXT, null, { completion: 'host-completion' })
     await act(async () => {})
 
     act(() => { fireEvent.click(screen.getByRole('button', { name: 'Play' })) })
@@ -1636,5 +1672,617 @@ describe('Reader session - save-position transitions', () => {
     expect(api.db.saveReadingPosition).toHaveBeenCalledTimes(1)
     expect(api.db.saveReadingPosition).toHaveBeenCalledWith(7, 3, 'text')
     expect(onBack).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('Reader session - session stats (ADR-0035)', () => {
+  // BASE_SETTINGS: 120 BPM × 2 words per stack over 12 words → six 500 ms beats.
+
+  it('emits one record on Stop: counted pause, active time excluding the paused span, credited words', async () => {
+    vi.useFakeTimers()
+    const api = stubApi()
+
+    renderReader(SAVED_TEXT)
+    await act(async () => {})
+
+    const startedAt = Date.now()
+    act(() => { fireEvent.click(screen.getByRole('button', { name: 'Play' })) })
+    await act(async () => { vi.advanceTimersByTime(1000) })                       // index 2
+    act(() => { fireEvent.click(screen.getByRole('button', { name: 'Pause' })) }) // explicit pause
+    await act(async () => { vi.advanceTimersByTime(3000) })                       // paused wait
+    act(() => { fireEvent.click(screen.getByRole('button', { name: 'Resume' })) })
+    await act(async () => { vi.advanceTimersByTime(500) })                        // index 3
+    act(() => { fireEvent.click(screen.getByRole('button', { name: 'Stop' })) })
+
+    expect(screen.getByRole('dialog', { name: 'Stop reading?' })).toBeTruthy()
+    expect(api.db.recordSessionStats).toHaveBeenCalledTimes(1)
+    expect(api.db.recordSessionStats).toHaveBeenCalledWith({
+      textId: 7,
+      title: 'Saved Fixture',
+      startedAt,
+      endedAt: startedAt + 4500,
+      activeMs: 1500,
+      wordsRead: 6,
+      pauses: 1,
+      rewinds: 0,
+    })
+  })
+
+  it('exempts a pause whose first quick-settings activity lands after 10 seconds', async () => {
+    vi.useFakeTimers()
+    const api = stubApi()
+
+    renderReader(SAVED_TEXT)
+    await act(async () => {})
+
+    act(() => { fireEvent.click(screen.getByRole('button', { name: 'Play' })) })
+    await act(async () => { vi.advanceTimersByTime(1000) })
+    act(() => { fireEvent.click(screen.getByRole('button', { name: 'Pause' })) })
+    await act(async () => { vi.advanceTimersByTime(10_000) })
+    act(() => { fireEvent.click(screen.getByRole('button', { name: 'Quick settings' })) })
+    act(() => { fireEvent.click(screen.getByRole('button', { name: 'Resume' })) })
+    await act(async () => { vi.advanceTimersByTime(500) })
+    act(() => { fireEvent.click(screen.getByRole('button', { name: 'Stop' })) })
+
+    expect(api.db.recordSessionStats).toHaveBeenCalledTimes(1)
+    expect(api.db.recordSessionStats).toHaveBeenCalledWith(
+      expect.objectContaining({ pauses: 0 })
+    )
+  })
+
+  it('counts a pause whose first quick-settings activity lands after five minutes', async () => {
+    vi.useFakeTimers()
+    const api = stubApi()
+
+    renderReader(SAVED_TEXT)
+    await act(async () => {})
+
+    act(() => { fireEvent.click(screen.getByRole('button', { name: 'Play' })) })
+    await act(async () => { vi.advanceTimersByTime(1000) })
+    act(() => { fireEvent.click(screen.getByRole('button', { name: 'Pause' })) })
+    await act(async () => { vi.advanceTimersByTime(5 * 60_000) })
+    act(() => { fireEvent.click(screen.getByRole('button', { name: 'Quick settings' })) })
+    act(() => { fireEvent.click(screen.getByRole('button', { name: 'Resume' })) })
+    await act(async () => { vi.advanceTimersByTime(500) })
+    act(() => { fireEvent.click(screen.getByRole('button', { name: 'Stop' })) })
+
+    expect(PAUSE_EXEMPTION_WINDOW_MS).toBe(30_000)
+    expect(api.db.recordSessionStats).toHaveBeenCalledTimes(1)
+    expect(api.db.recordSessionStats).toHaveBeenCalledWith(
+      expect.objectContaining({ pauses: 1 })
+    )
+  })
+
+  it('does not let later setup activity un-exempt an early first nudge', async () => {
+    vi.useFakeTimers()
+    const api = stubApi()
+
+    const session = renderSessionInterface()
+    await act(async () => {})
+
+    act(() => { session().play() })
+    await act(async () => { vi.advanceTimersByTime(1000) })
+    act(() => { session().pause() })
+    await act(async () => { vi.advanceTimersByTime(10_000) })
+    act(() => { session().noteSetupActivity() })
+    await act(async () => { vi.advanceTimersByTime(5 * 60_000) })
+    act(() => { session().noteSetupActivity() })
+    act(() => { session().resume() })
+    await act(async () => { vi.advanceTimersByTime(500) })
+    act(() => { session().stop() })
+
+    expect(api.db.recordSessionStats).toHaveBeenCalledTimes(1)
+    expect(api.db.recordSessionStats).toHaveBeenCalledWith(
+      expect.objectContaining({ pauses: 0 })
+    )
+  })
+
+  it('never counts the browse-entry auto-pause', async () => {
+    vi.useFakeTimers()
+    const api = stubApi()
+
+    renderReader(SAVED_TEXT)
+    await act(async () => {})
+
+    act(() => { fireEvent.click(screen.getByRole('button', { name: 'Play' })) })
+    await act(async () => { vi.advanceTimersByTime(1000) })
+    act(() => { fireEvent.click(screen.getByRole('button', { name: 'Browse library' })) })
+    act(() => { fireEvent.click(screen.getByRole('button', { name: 'Back to reading' })) })
+    act(() => { fireEvent.click(screen.getByRole('button', { name: 'Resume' })) })
+    await act(async () => { vi.advanceTimersByTime(500) })
+    act(() => { fireEvent.click(screen.getByRole('button', { name: 'Stop' })) })
+
+    expect(api.db.recordSessionStats).toHaveBeenCalledTimes(1)
+    expect(api.db.recordSessionStats).toHaveBeenCalledWith(
+      expect.objectContaining({ pauses: 0 })
+    )
+  })
+
+  it('collapses consecutive rewinds into one event, re-arms only after forward playback, and never double-counts re-read words', async () => {
+    vi.useFakeTimers()
+    const api = stubApi()
+
+    const session = renderSessionInterface()
+    await act(async () => {})
+
+    act(() => { session().play() })
+    await act(async () => { vi.advanceTimersByTime(1500) })  // index 3, high water 6 words
+    act(() => { session().rewind(1) })
+    act(() => { session().rewind(1) })
+    act(() => { session().rewind(1) })                       // index 0 — one event
+    await act(async () => { vi.advanceTimersByTime(1000) })  // forward playback re-arms
+    act(() => { session().rewind(1) })                       // second event
+    await act(async () => { vi.advanceTimersByTime(500) })
+    act(() => { session().stop() })
+
+    expect(api.db.recordSessionStats).toHaveBeenCalledTimes(1)
+    expect(api.db.recordSessionStats).toHaveBeenCalledWith(
+      expect.objectContaining({ rewinds: 2, wordsRead: 6 })
+    )
+    expect(session().finishedSessionStats).toEqual(api.db.recordSessionStats.mock.calls[0][0])
+  })
+
+  it('emits when the Reader is left mid-play', async () => {
+    vi.useFakeTimers()
+    const api = stubApi()
+
+    const session = renderSessionInterface()
+    await act(async () => {})
+
+    act(() => { session().play() })
+    await act(async () => { vi.advanceTimersByTime(1000) })
+    act(() => { session.unmount() })
+
+    expect(api.db.recordSessionStats).toHaveBeenCalledTimes(1)
+    expect(api.db.recordSessionStats).toHaveBeenCalledWith(
+      expect.objectContaining({ wordsRead: 4, activeMs: 1000 })
+    )
+  })
+
+  it('emits nothing for a host-completion (Overlay Reader) run, even on leave', async () => {
+    vi.useFakeTimers()
+    const api = stubApi()
+
+    renderReader(SAVED_TEXT, null, { completion: 'host-completion' })
+    await act(async () => {})
+
+    act(() => { fireEvent.click(screen.getByRole('button', { name: 'Play' })) })
+    await act(async () => { vi.advanceTimersByTime(3500) })
+    expect(screen.getByText('Finished.')).toBeTruthy()
+
+    cleanup()
+    expect(api.db.recordSessionStats).not.toHaveBeenCalled()
+  })
+
+  it('records nothing for a session that advanced zero words', async () => {
+    vi.useFakeTimers()
+    const api = stubApi()
+
+    renderReader(SAVED_TEXT)
+    await act(async () => {})
+
+    act(() => { fireEvent.click(screen.getByRole('button', { name: 'Play' })) })
+    act(() => { fireEvent.click(screen.getByRole('button', { name: 'Stop' })) })  // before the first beat
+
+    expect(screen.getByRole('dialog', { name: 'Stop reading?' })).toBeTruthy()
+    cleanup()
+    expect(api.db.recordSessionStats).not.toHaveBeenCalled()
+  })
+
+  it('still emits for a discarded run — discard moves the resume point, not the activity', async () => {
+    vi.useFakeTimers()
+    const api = stubApi()
+    const onExitToLibrary = vi.fn()
+
+    renderReader(SAVED_TEXT, null, { onExitToLibrary })
+    await act(async () => {})
+
+    act(() => { fireEvent.click(screen.getByRole('button', { name: 'Play' })) })
+    await act(async () => { vi.advanceTimersByTime(1000) })
+    act(() => { fireEvent.click(screen.getByRole('button', { name: 'Stop' })) })
+
+    expect(api.db.recordSessionStats).toHaveBeenCalledTimes(1)
+    expect(api.db.recordSessionStats).toHaveBeenCalledWith(
+      expect.objectContaining({ wordsRead: 4 })
+    )
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Exit without saving' }))
+      await Promise.resolve()
+    })
+
+    expect(onExitToLibrary).toHaveBeenCalledTimes(1)
+    expect(api.db.recordSessionStats).toHaveBeenCalledTimes(1)
+  })
+
+  it('emits on a Target crossing', async () => {
+    vi.useFakeTimers()
+    const api = stubApi()
+
+    const session = renderSessionInterface(HARNESS_GOAL)
+    await act(async () => {})
+
+    act(() => { session().play() })
+    await act(async () => { vi.advanceTimersByTime(1000) })
+    await act(async () => {})
+
+    expect(session().sessionEnd).toBe('goal')
+    expect(api.db.recordSessionStats).toHaveBeenCalledTimes(1)
+    expect(api.db.recordSessionStats).toHaveBeenCalledWith(
+      expect.objectContaining({ wordsRead: 4, pauses: 0, rewinds: 0 })
+    )
+  })
+
+  it('emits on the natural end, crediting the final stack', async () => {
+    vi.useFakeTimers()
+    const api = stubApi()
+
+    const session = renderSessionInterface()
+    await act(async () => {})
+
+    const startedAt = Date.now()
+    act(() => { session().play() })
+    await act(async () => { vi.advanceTimersByTime(3000) })
+    await act(async () => {})
+
+    expect(session().sessionEnd).toBe('end')
+    expect(api.db.recordSessionStats).toHaveBeenCalledTimes(1)
+    expect(api.db.recordSessionStats).toHaveBeenCalledWith(
+      expect.objectContaining({ wordsRead: 12, activeMs: 3000, startedAt, endedAt: startedAt + 3000 })
+    )
+    expect(session().finishedSessionStats).toEqual(api.db.recordSessionStats.mock.calls[0][0])
+  })
+
+  it('adds no renders per beat attributable to the tracker', async () => {
+    vi.useFakeTimers()
+    stubApi()
+
+    let renders = 0
+    const held = { current: null as ReadingSession | null }
+    function CountingProbe() {
+      renders += 1
+      held.current = useReadingSession({
+        text: SAVED_TEXT,
+        settings: BASE_SETTINGS,
+        segmentCtx: undefined,
+        completion: 'session-dialog',
+        rereReadEndIndex: null,
+        goalBookmark: null,
+        resumeFromIndex: null,
+        resumeFromWordOffset: null,
+        onGoalBookmarkConsumed: () => {},
+        refreshResumeCandidate: () => {},
+      })
+      return null
+    }
+
+    render(<CountingProbe />)
+    await act(async () => {})
+    act(() => { held.current!.play() })
+
+    const before = renders
+    await act(async () => { vi.advanceTimersByTime(1000) })  // two beats
+
+    // At most one render per index advance (React may batch tighter): the
+    // tracker is refs-only, so it must add no renders of its own on top.
+    expect(renders - before).toBeGreaterThanOrEqual(1)
+    expect(renders - before).toBeLessThanOrEqual(2)
+  })
+})
+
+describe('Reader session - credited frontier (ADR-0036 D2)', () => {
+  // BASE_SETTINGS: 120 BPM × 2 words per stack over 12 words → six 500 ms
+  // beats; offsetAtStack(i) = 2i. Every manual move (the skip button, → and
+  // Shift+→, the scrubber, a bookmark jump) routes through session.seekTo.
+
+  it('credits nothing for a forward seek under the stop fold', async () => {
+    vi.useFakeTimers()
+    const api = stubApi()
+
+    const session = renderSessionInterface()
+    await act(async () => {})
+
+    act(() => { session().play() })
+    await act(async () => { vi.advanceTimersByTime(1000) })  // beats to index 2 → 4 words
+    act(() => { session().seekTo(5) })                       // forward seek: no credit
+    act(() => { session().stop() })
+
+    expect(api.db.recordSessionStats).toHaveBeenCalledTimes(1)
+    expect(api.db.recordSessionStats).toHaveBeenCalledWith(
+      expect.objectContaining({ wordsRead: 4 })
+    )
+  })
+
+  it('credits nothing for a forward seek under the pause fold', async () => {
+    vi.useFakeTimers()
+    const api = stubApi()
+
+    const session = renderSessionInterface()
+    await act(async () => {})
+
+    act(() => { session().play() })
+    await act(async () => { vi.advanceTimersByTime(1000) })  // 4 words
+    act(() => { session().seekTo(5) })
+    act(() => { session().pause() })                         // the pause fold must not read the index
+    act(() => { session.unmount() })                         // emit on leave
+
+    expect(api.db.recordSessionStats).toHaveBeenCalledTimes(1)
+    expect(api.db.recordSessionStats).toHaveBeenCalledWith(
+      expect.objectContaining({ wordsRead: 4 })
+    )
+  })
+
+  it('credits only the stacks playback advances after the seek landing point (first post-seek beat included)', async () => {
+    vi.useFakeTimers()
+    const api = stubApi()
+
+    const session = renderSessionInterface()
+    await act(async () => {})
+
+    act(() => { session().play() })
+    await act(async () => { vi.advanceTimersByTime(1000) })  // index 2 → 4 words
+    act(() => { session().seekTo(4) })                       // frontier rebases to 8, no credit
+    await act(async () => { vi.advanceTimersByTime(500) })   // first post-seek beat: index 5 → +2
+    act(() => { session().stop() })
+
+    expect(api.db.recordSessionStats).toHaveBeenCalledTimes(1)
+    expect(api.db.recordSessionStats).toHaveBeenCalledWith(
+      expect.objectContaining({ wordsRead: 6 })
+    )
+  })
+
+  it('ignores a scrubber drag and a Shift+→ skip while playing (Stop fold)', async () => {
+    vi.useFakeTimers()
+    const api = stubApi()
+
+    renderReader(SAVED_TEXT)
+    await act(async () => {})
+
+    act(() => { fireEvent.click(screen.getByRole('button', { name: 'Play' })) })
+    await act(async () => { vi.advanceTimersByTime(1000) })  // 4 words
+    const scrubber = screen.getByRole('slider', { name: 'Reading position' }) as HTMLInputElement
+    act(() => { fireEvent.change(scrubber, { target: { value: '4' } }) })
+    act(() => { fireEvent.keyDown(window, { code: 'ArrowRight', shiftKey: true }) })
+    act(() => { fireEvent.click(screen.getByRole('button', { name: 'Stop' })) })
+
+    expect(Number(scrubber.value)).toBe(5)
+    expect(api.db.recordSessionStats).toHaveBeenCalledTimes(1)
+    expect(api.db.recordSessionStats).toHaveBeenCalledWith(
+      expect.objectContaining({ wordsRead: 4 })
+    )
+  })
+
+  it('ignores a bookmark jump while the session is live', async () => {
+    vi.useFakeTimers()
+    const api = stubApi(null, [
+      {
+        id: 61,
+        textId: 7,
+        kind: 'normal',
+        wordOffset: 8,
+        label: 'Later turn',
+        createdAt: '2026-07-12T00:00:00.000Z',
+      },
+    ])
+
+    renderReader(SAVED_TEXT)
+    await act(async () => {})
+
+    act(() => { fireEvent.click(screen.getByRole('button', { name: 'Play' })) })
+    await act(async () => { vi.advanceTimersByTime(1000) })  // 4 words
+    openBookmarkPopover()
+    act(() => {
+      fireEvent.click(screen.getByRole('button', { name: 'Read from bookmark: Later turn' }))
+    })
+    act(() => { fireEvent.click(screen.getByRole('button', { name: 'Stop' })) })
+
+    expect(api.db.recordSessionStats).toHaveBeenCalledTimes(1)
+    expect(api.db.recordSessionStats).toHaveBeenCalledWith(
+      expect.objectContaining({ wordsRead: 4 })
+    )
+  })
+
+  it('credits nothing when a backward scrubber seek replays already-credited text', async () => {
+    vi.useFakeTimers()
+    const api = stubApi()
+
+    const session = renderSessionInterface()
+    await act(async () => {})
+
+    act(() => { session().play() })
+    await act(async () => { vi.advanceTimersByTime(1500) })  // index 3 → 6 words, frontier 6
+    act(() => { session().seekTo(1) })                       // backward: frontier stays
+    await act(async () => { vi.advanceTimersByTime(1000) })  // replay to index 3 → 0 new words
+    act(() => { session().stop() })
+
+    expect(api.db.recordSessionStats).toHaveBeenCalledTimes(1)
+    expect(api.db.recordSessionStats).toHaveBeenCalledWith(
+      expect.objectContaining({ wordsRead: 6 })
+    )
+  })
+
+  it('pins the conservative edge: reading a skipped gap after backtracking into it credits nothing', async () => {
+    vi.useFakeTimers()
+    const api = stubApi()
+
+    const session = renderSessionInterface()
+    await act(async () => {})
+
+    act(() => { session().play() })
+    await act(async () => { vi.advanceTimersByTime(1000) })  // index 2 → 4 words
+    act(() => { session().seekTo(4) })                       // frontier 8; stacks 2–3 are the gap
+    act(() => { session().seekTo(2) })                       // backtrack into the gap
+    await act(async () => { vi.advanceTimersByTime(1000) })  // genuinely read the gap → still behind frontier
+    act(() => { session().stop() })
+
+    expect(api.db.recordSessionStats).toHaveBeenCalledTimes(1)
+    expect(api.db.recordSessionStats).toHaveBeenCalledWith(
+      expect.objectContaining({ wordsRead: 4 })
+    )
+  })
+
+  it('credits per tap-to-read step() while restart() credits nothing', async () => {
+    vi.useFakeTimers()
+    const api = stubApi()
+
+    const session = renderSessionInterface()
+    await act(async () => {})
+
+    act(() => { session().play() })     // no timers advanced: only steps move the index
+    act(() => { session().step() })     // index 1 → 2 words
+    act(() => { session().step() })     // index 2 → 4 words
+    act(() => { session().restart() })  // backward move: frontier stays at 4
+    await act(async () => { vi.advanceTimersByTime(500) })  // replay index 1 → 0 new words
+    act(() => { session().stop() })
+
+    expect(api.db.recordSessionStats).toHaveBeenCalledTimes(1)
+    expect(api.db.recordSessionStats).toHaveBeenCalledWith(
+      expect.objectContaining({ wordsRead: 4 })
+    )
+  })
+})
+
+describe('Reader session - gap-clamped active time (ADR-0036 D3)', () => {
+  // BASE_SETTINGS is 120 BPM, so the nominal beat is 500 ms and the clamp is
+  // max(4 × 500, 10_000) = the 10 s floor. `emitted` reads the one record the
+  // finished session emitted.
+  function emitted(api: ReturnType<typeof stubApi>): SessionStatsRecord {
+    expect(api.db.recordSessionStats).toHaveBeenCalledTimes(1)
+    return api.db.recordSessionStats.mock.calls[0][0] as SessionStatsRecord
+  }
+
+  it('banks the clamp, not five idle minutes, for a gap between two taps', async () => {
+    vi.useFakeTimers()
+    const api = stubApi()
+
+    const session = renderSessionInterface(null, TAP_SETTINGS)
+    await act(async () => {})
+
+    act(() => { session().play() })                             // no beat is ever scheduled
+    act(() => { session().step() })                             // tap 1
+    await act(async () => { vi.advanceTimersByTime(300_000) })  // walk away for five minutes
+    act(() => { session().step() })                             // tap 2 closes one 5-minute gap
+    act(() => { session().stop() })
+
+    expect(emitted(api)).toMatchObject({ wordsRead: 4, activeMs: GAP_CLAMP_FLOOR_MS })
+  })
+
+  it('accrues real gaps while tapping under the cap', async () => {
+    vi.useFakeTimers()
+    const api = stubApi()
+
+    const session = renderSessionInterface(null, TAP_SETTINGS)
+    await act(async () => {})
+
+    act(() => { session().play() })
+    act(() => { session().step() })                             // entry gap: 0 ms
+    await act(async () => { vi.advanceTimersByTime(2_000) })
+    act(() => { session().step() })                             // 2 s, under the cap
+    await act(async () => { vi.advanceTimersByTime(3_000) })
+    act(() => { session().step() })                             // 3 s, under the cap
+    act(() => { session().stop() })
+
+    expect(emitted(api)).toMatchObject({ wordsRead: 6, activeMs: 5_000 })
+  })
+
+  it('leaves ordinary timer play alone — the clamp never binds', async () => {
+    vi.useFakeTimers()
+    const api = stubApi()
+
+    const session = renderSessionInterface()
+    await act(async () => {})
+
+    act(() => { session().play() })
+    await act(async () => { vi.advanceTimersByTime(2_500) })    // five 500 ms beats
+    act(() => { session().stop() })
+
+    // Five beat-sized gaps, exactly the pre-change playing-state total.
+    expect(emitted(api)).toMatchObject({ wordsRead: 10, activeMs: 2_500 })
+  })
+
+  it('credits at most the clamp for a multi-minute stall between beats', async () => {
+    vi.useFakeTimers()
+    const api = stubApi()
+
+    const session = renderSessionInterface()
+    await act(async () => {})
+
+    act(() => { session().play() })
+    await act(async () => { vi.advanceTimersByTime(1_000) })    // two beats: 1 s of reading
+    // A suspend: the wall clock jumps five minutes while the pending beat
+    // timer keeps its remaining delay, so the next beat lands 5 min later.
+    act(() => { vi.setSystemTime(Date.now() + 300_000) })
+    await act(async () => { vi.advanceTimersByTime(500) })
+    act(() => { session().stop() })
+
+    expect(emitted(api)).toMatchObject({
+      wordsRead: 6,
+      activeMs: 1_000 + GAP_CLAMP_FLOOR_MS,
+    })
+  })
+
+  it('clamps the entry gap and the exit gap the same way', async () => {
+    vi.useFakeTimers()
+    const api = stubApi()
+
+    const session = renderSessionInterface(null, TAP_SETTINGS)
+    await act(async () => {})
+
+    act(() => { session().play() })                             // entry gap opens here
+    await act(async () => { vi.advanceTimersByTime(300_000) })
+    act(() => { session().step() })                             // …and closes clamped
+    await act(async () => { vi.advanceTimersByTime(300_000) })
+    act(() => { session().stop() })                             // exit gap, clamped too
+
+    expect(emitted(api)).toMatchObject({ wordsRead: 2, activeMs: 2 * GAP_CLAMP_FLOOR_MS })
+  })
+
+  it('follows a mid-session BPM change: at 5 BPM the tempo term governs', async () => {
+    vi.useFakeTimers()
+    const api = stubApi()
+
+    const session = renderSessionInterface(null, TAP_SETTINGS)
+    await act(async () => {})
+
+    act(() => { session().play() })
+    act(() => { session().step() })
+    act(() => { session.editSettings({ bpm: 5 }) })             // a 12 s beat → a 48 s clamp
+    await act(async () => { vi.advanceTimersByTime(30_000) })
+    act(() => { session().step() })
+    act(() => { session().stop() })
+
+    // Under the 120 BPM clamp this gap would have banked 10 s; the slower
+    // tempo makes 30 s of it real reading time.
+    expect(maxCreditedGapMs(5)).toBe(48_000)
+    expect(emitted(api)).toMatchObject({ wordsRead: 4, activeMs: 30_000 })
+  })
+
+  it('keeps an idle-heavy tap session off Fluency 100', async () => {
+    vi.useFakeTimers()
+    const api = stubApi()
+
+    const session = renderSessionInterface(null, TAP_SETTINGS)
+    await act(async () => {})
+
+    act(() => { session().play() })
+    act(() => { session().step() })
+    await act(async () => { vi.advanceTimersByTime(300_000) })
+    act(() => { session().step() })
+    await act(async () => { vi.advanceTimersByTime(300_000) })
+    act(() => { session().step() })
+    act(() => { session().rewind(1) })                          // one interruption
+    act(() => { session().stop() })
+
+    const record = emitted(api)
+    expect(record.activeMs).toBe(2 * GAP_CLAMP_FLOOR_MS)
+    expect(record.endedAt - record.startedAt).toBe(600_000)     // ten minutes of wall time
+
+    // Two interruption points over 20 s of real reading is a rough session,
+    // and the score says so. Before the clamp the same ten idle minutes were
+    // the denominator, so one rewind bought a near-perfect score for free —
+    // and the measured speed was a tenth of what it should be.
+    expect(fluencyScore(interruptionRate(record))).toBe(14)
+    expect(fluencyScore(interruptionRate({ ...record, activeMs: 600_000 }))).toBe(83)
+    expect(Math.round(measuredWpm(record))).toBe(18)
   })
 })

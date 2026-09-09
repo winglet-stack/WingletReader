@@ -1,4 +1,4 @@
-export type ImportSourceType = 'text' | 'txt' | 'docx' | 'pdf' | 'json'
+export type ImportSourceType = 'text' | 'txt' | 'docx' | 'pdf' | 'json' | 'epub'
 
 export interface ImportCleanupAction {
   type:
@@ -39,6 +39,13 @@ export interface ImportDiagnostics {
   pageCount?: number
   cleanupActions: ImportCleanupAction[]
   suspiciousSignals: ImportSuspiciousSignal[]
+  /** EPUB only (ADR-0034 §7): the publication's first `dc:identifier`.
+   *  Recorded as evidence — deliberately **not** a dedupe key; wild identifiers
+   *  are unreliable and identity policy belongs to the library-API design. */
+  epubIdentifier?: string
+  /** EPUB only (ADR-0034 §4): images dropped by extraction. Counted and
+   *  disclosed on the confirm card rather than replaced by placeholders. */
+  imagesOmitted?: number
 }
 
 export type ImportedBlockType = 'heading' | 'paragraph' | 'list' | 'tableText'

@@ -1,0 +1,412 @@
+{
+  "_provenance": [
+    "Synthesized fixture of a WingletReader data store as written by v0.2.0-alpha.1",
+    "(tag 3baba60, 2026-07-16). Reconstructed from `git show v0.2.0-alpha.1:src/main/database.ts`",
+    "(StoreData key set + createDefaultStore/load ordering, saveText/saveSegments/appendSegment/",
+    "saveBookmark/saveReadingPosition/saveCategory write paths), `src/shared/domainRecords.ts`",
+    "(record shapes) and `src/shared/settings.ts` (DEFAULT_SETTINGS key set, nested",
+    "global/reader/rww SettingsStore, seedRwwFromReader) at that tag. It is NOT copied from any",
+    "real user's store. Faithful-by-design details: no `stats` (ADR-0035), no `source_type: 'epub'`",
+    "or `author` (ADR-0034), `lines_enabled`/`rww_lines_enabled` still present and no `lines_anchor`",
+    "(ADR-0032 landed 2026-07-20, after the tag), no `daily_word_quota`/`weekly_quota_days`",
+    "(ADR-0035), a seed-loader book with `seed_id` plus a populated ADR-0018 ledger (the loader was",
+    "live at 0.2.0), counters above max-id+1 (records deleted earlier). This `_provenance` key is the",
+    "one thing 0.2.0 never wrote; upgradeStoreFixture.test.ts strips it before writing the store to",
+    "disk. If the sample must change, keep every word_count/offset consistent with the 0.2.0 rule",
+    "(trim, split on whitespace) — getBookmarks clamps to word_count and drops goals beyond it."
+  ],
+  "nextId": 9,
+  "nextCategoryId": 6,
+  "nextSegmentId": 12,
+  "nextBookmarkId": 7,
+  "nextSummaryId": 1,
+  "nextSummaryQuestionId": 1,
+  "texts": [
+    {
+      "id": 1,
+      "title": "Harbour notes",
+      "content": "Morning light crept across the harbour wall while the fishing boats rocked at their moorings.\n\nNobody spoke. The tide was turning, and everyone knew what that meant for the day ahead.\n\nBy noon the nets were full and the arguments about who had caught the most had already begun.",
+      "word_count": 49,
+      "is_manual_book": false,
+      "category_id": 1,
+      "created_at": "2026-07-17T08:12:04.117Z",
+      "updated_at": "2026-07-17T08:12:04.117Z"
+    },
+    {
+      "id": 2,
+      "title": "The Winds of Kestrel",
+      "content": "# Chapter 1\n\nThe tower at Kestrel Point had stood empty for eleven winters. Mara counted them on the walk up, one per switchback, and arrived at the door with cold hands and a stubborn kind of hope.\n\n# Chapter 2\n\nInside, the lamp room smelled of salt and old brass. She found the logbook where her grandmother said it would be, wedged behind the lens housing, its pages swollen but legible.\n\n# Chapter 3\n\nThe last entry was dated the night of the storm. It did not mention the ship. It mentioned only the wind, which the writer had called, in a careful hand, the winds of Kestrel.",
+      "word_count": 109,
+      "is_manual_book": false,
+      "content_display": "# Chapter 1\nThe tower at Kestrel Point had stood empty for eleven winters.\nMara counted them on the walk up, one per switchback, and arrived at the door with cold hands and a stubborn kind of hope.\n\n# Chapter 2\nInside, the lamp room smelled of salt and old brass.\nShe found the logbook where her grandmother said it would be, wedged behind the lens housing, its pages swollen but legible.\n\n# Chapter 3\nThe last entry was dated the night of the storm.\nIt did not mention the ship. It mentioned only the wind, which the writer had called, in a careful hand, the winds of Kestrel.",
+      "import_diagnostics": {
+        "parser": "text",
+        "sourceExtension": "txt",
+        "fileSizeBytes": 812,
+        "charCount": 580,
+        "wordCount": 109,
+        "paragraphCount": 6,
+        "cleanupActions": [
+          "normalized-line-endings",
+          "converted-soft-line-wraps"
+        ],
+        "suspiciousSignals": []
+      },
+      "category_id": 4,
+      "created_at": "2026-07-18T19:40:51.902Z",
+      "updated_at": "2026-07-21T06:03:17.330Z"
+    },
+    {
+      "id": 3,
+      "title": "Field journal",
+      "content": "Arrived at the field station after dark. The generator coughed twice and then held.\n\nCounted forty-two nests along the north ridge before the rain drove me back inside.",
+      "word_count": 28,
+      "is_manual_book": true,
+      "category_id": 2,
+      "created_at": "2026-07-19T14:22:09.455Z",
+      "updated_at": "2026-07-19T14:31:48.010Z"
+    },
+    {
+      "id": 4,
+      "title": "Sample Curated Book",
+      "content": "I. The Lantern\n\nA lantern is a small promise. It says that someone expects to come back this way, and expects the dark to be waiting when they do.\n\nII. The Road\n\nThe road out of the village was older than the village. It bent where the river had once bent, though the river had long since changed its mind.",
+      "word_count": 60,
+      "is_manual_book": false,
+      "seed_id": "sample-curated-book",
+      "category_id": 3,
+      "created_at": "2026-07-16T21:00:00.000Z",
+      "updated_at": "2026-07-16T21:00:00.000Z"
+    }
+  ],
+  "categories": [
+    {
+      "id": 1,
+      "name": "Uncategorized",
+      "is_system": true,
+      "is_locked": true
+    },
+    {
+      "id": 2,
+      "name": "Reading",
+      "is_system": true
+    },
+    {
+      "id": 3,
+      "name": "Archive",
+      "is_system": true
+    },
+    {
+      "id": 4,
+      "name": "Research",
+      "is_system": false,
+      "is_locked": false
+    }
+  ],
+  "segments": [
+    {
+      "id": 1,
+      "textId": 2,
+      "title": "Chapter 1",
+      "content": "The tower at Kestrel Point had stood empty for eleven winters. Mara counted them on the walk up, one per switchback, and arrived at the door with cold hands and a stubborn kind of hope.",
+      "order": 0,
+      "sourceType": "detected_heading",
+      "word_count": 35
+    },
+    {
+      "id": 2,
+      "textId": 2,
+      "title": "Chapter 2",
+      "content": "Inside, the lamp room smelled of salt and old brass. She found the logbook where her grandmother said it would be, wedged behind the lens housing, its pages swollen but legible.",
+      "order": 1,
+      "sourceType": "detected_heading",
+      "word_count": 31
+    },
+    {
+      "id": 3,
+      "textId": 2,
+      "title": "Chapter 3",
+      "content": "The last entry was dated the night of the storm. It did not mention the ship. It mentioned only the wind, which the writer had called, in a careful hand, the winds of Kestrel.",
+      "order": 2,
+      "sourceType": "detected_heading",
+      "word_count": 34
+    },
+    {
+      "id": 4,
+      "textId": 3,
+      "title": "Day One",
+      "content": "Arrived at the field station after dark. The generator coughed twice and then held.",
+      "order": 0,
+      "sourceType": "detected_heading",
+      "word_count": 14,
+      "startWordOffset": 0,
+      "endWordOffset": 14
+    },
+    {
+      "id": 5,
+      "textId": 3,
+      "title": "Day Two",
+      "content": "Counted forty-two nests along the north ridge before the rain drove me back inside.",
+      "order": 1,
+      "sourceType": "detected_heading",
+      "word_count": 14,
+      "startWordOffset": 14,
+      "endWordOffset": 28
+    },
+    {
+      "id": 6,
+      "textId": 4,
+      "title": "I. The Lantern",
+      "content": "A lantern is a small promise. It says that someone expects to come back this way, and expects the dark to be waiting when they do.",
+      "order": 0,
+      "sourceType": "detected_heading",
+      "word_count": 29,
+      "startWordOffset": 0,
+      "endWordOffset": 29
+    },
+    {
+      "id": 7,
+      "textId": 4,
+      "title": "II. The Road",
+      "content": "The road out of the village was older than the village. It bent where the river had once bent, though the river had long since changed its mind.",
+      "order": 1,
+      "sourceType": "detected_heading",
+      "word_count": 31,
+      "startWordOffset": 29,
+      "endWordOffset": 60
+    }
+  ],
+  "bookmarks": [
+    {
+      "id": 1,
+      "textId": 2,
+      "kind": "normal",
+      "wordOffset": 41,
+      "label": "Lamp room",
+      "createdAt": "2026-07-20T10:15:33.201Z"
+    },
+    {
+      "id": 2,
+      "textId": 2,
+      "kind": "goal",
+      "wordOffset": 95,
+      "label": "Stop before the last entry",
+      "createdAt": "2026-07-21T06:02:58.774Z"
+    },
+    {
+      "id": 3,
+      "textId": 1,
+      "kind": "normal",
+      "wordOffset": 16,
+      "label": "The tide",
+      "createdAt": "2026-07-17T08:20:11.006Z"
+    },
+    {
+      "id": 4,
+      "textId": 4,
+      "kind": "goal",
+      "wordOffset": 30,
+      "label": "End of The Lantern",
+      "createdAt": "2026-07-22T18:45:02.560Z"
+    }
+  ],
+  "summaries": [],
+  "summaryQuestions": [],
+  "readingPositions": [
+    {
+      "textId": 1,
+      "stackIndex": 4,
+      "updatedAt": "2026-07-17T08:19:40.512Z",
+      "source": "text"
+    },
+    {
+      "textId": 2,
+      "stackIndex": 9,
+      "updatedAt": "2026-07-21T06:03:17.330Z",
+      "source": "text"
+    },
+    {
+      "textId": 4,
+      "stackIndex": 3,
+      "updatedAt": "2026-07-19T14:31:48.010Z",
+      "source": "segment"
+    }
+  ],
+  "settings": {
+    "global": {
+      "theme": "light",
+      "segmentation_enabled": true,
+      "segmentation_threshold": 5000,
+      "segmentation_chunk_size": 1500,
+      "auto_chapter_detection": true,
+      "summaries_initialized": false,
+      "chunk_rule_long_word": true,
+      "chunk_rule_enumerations": false,
+      "chunk_rule_bullets": true,
+      "chunk_rule_commas": false,
+      "chunk_rule_names": true,
+      "chunk_rule_headlines": true,
+      "read_while_working_enabled": false,
+      "custom_transmute_presets": [
+        {
+          "id": "tp-1",
+          "name": "Square clip",
+          "bpm": 80,
+          "wordsPerStack": 3,
+          "pauseAtSentences": true,
+          "pauseAtHeadlines": true,
+          "fontSize": 48,
+          "fontFamily": "Georgia",
+          "theme": "dark",
+          "bgColor": "#000000",
+          "textColor": "#ffffff",
+          "stackVerticalOffset": 0,
+          "stackHorizontalOffset": 0,
+          "highlightActive": true,
+          "highlightColor": "#ffcc00",
+          "highlightTextColor": "#000000",
+          "highlightMode": "default",
+          "highlightPanningChunkSize": 0,
+          "highlightingMode": "default",
+          "linesEnabled": false,
+          "linesCount": 3,
+          "linesRowGap": 8,
+          "stacksVisible": 1,
+          "stackGap": 32,
+          "showChunkDividers": true,
+          "chunkRuleLongWord": false,
+          "chunkRuleEnumerations": false,
+          "chunkRuleBullets": false,
+          "chunkRuleCommas": false,
+          "chunkRuleNames": false,
+          "resolution": "720x720",
+          "maxDurationMinutes": null,
+          "contentLimitType": "none",
+          "contentLimitWords": 0,
+          "contentLimitPercentage": 100,
+          "showProgressOverlay": true,
+          "bgColorOverride": "",
+          "transparentBackground": false
+        }
+      ]
+    },
+    "reader": {
+      "words_per_stack": 4,
+      "stacks_visible": 2,
+      "stack_gap": 40,
+      "bpm": 72,
+      "metronome_enabled": false,
+      "pause_at_sentences": true,
+      "pause_at_headlines": true,
+      "font_size": 42,
+      "stack_vertical_offset": -10,
+      "stack_horizontal_offset": 5,
+      "highlight_active": true,
+      "lines_enabled": true,
+      "lines_count": 2,
+      "lines_row_gap": 12,
+      "view_style": "default",
+      "show_chunk_dividers": false,
+      "highlight_color": "#ffcc00",
+      "viewport_bg_color": "#101418",
+      "text_color": "#e8e8e8",
+      "font_family": "Georgia",
+      "highlight_text_color": "#000000",
+      "highlight_mode": "progressive-bar",
+      "highlight_panning_chunk_size": 0,
+      "highlighting_mode": "progressive",
+      "tap_to_read": false,
+      "tap_to_read_key": "Space",
+      "live_rewind_stacks": 2,
+      "live_rewind_key": "Mouse1",
+      "lock_at_wpm": true,
+      "target_wpm": 288,
+      "custom_palettes": [
+        {
+          "id": "pal-1",
+          "name": "Slate",
+          "viewport_bg_color": "#101418",
+          "text_color": "#e8e8e8",
+          "highlight_color": "#ffcc00",
+          "highlight_text_color": "#000000",
+          "highlight_active": true
+        }
+      ],
+      "custom_text_presets": [
+        {
+          "id": "ts-1",
+          "name": "Large",
+          "font_size": 48
+        }
+      ],
+      "custom_font_presets": [
+        {
+          "id": "fp-1",
+          "name": "Serif",
+          "font_family": "Georgia"
+        }
+      ],
+      "custom_playback_presets": [
+        {
+          "id": "pb-1",
+          "name": "Evening",
+          "bpm": 60,
+          "words_per_stack": 3,
+          "stacks_visible": 1,
+          "lines_enabled": false,
+          "lines_count": 3
+        }
+      ],
+      "custom_reader_configs": [
+        {
+          "id": "rc-1",
+          "name": "Study",
+          "font_size": 36,
+          "font_family": "Georgia",
+          "bpm": 66,
+          "words_per_stack": 3,
+          "stacks_visible": 2,
+          "lines_enabled": true,
+          "lines_count": 3,
+          "lines_row_gap": 10,
+          "metronome_enabled": false,
+          "pause_at_sentences": true,
+          "pause_at_headlines": true,
+          "viewport_bg_color": "#101418",
+          "text_color": "#e8e8e8",
+          "highlight_color": "#ffcc00",
+          "highlight_text_color": "#000000",
+          "highlight_active": true,
+          "highlight_mode": "default",
+          "highlight_panning_chunk_size": 0,
+          "highlighting_mode": "default",
+          "show_chunk_dividers": true,
+          "stack_gap": 32,
+          "stack_vertical_offset": 0,
+          "stack_horizontal_offset": 0
+        }
+      ]
+    },
+    "rww": {
+      "read_while_working_shortcut": "Control+Alt+Space",
+      "read_while_working_exit_shortcut": "Control+Alt+Q",
+      "read_while_working_window_width": 720,
+      "read_while_working_window_height": 400,
+      "read_while_working_restore_clipboard": false,
+      "read_while_working_show_standby_control": true,
+      "read_while_working_standby_x": 120,
+      "read_while_working_standby_y": 80,
+      "custom_rww_playback_presets": [],
+      "bpm": 90,
+      "words_per_stack": 2,
+      "stacks_visible": 1,
+      "lines_enabled": false,
+      "lines_count": 2,
+      "font_size": 30
+    }
+  },
+  "seededIds": [
+    "sample-curated-book",
+    "a-previously-deleted-seed"
+  ],
+  "seededBundleVersion": 1
+}

@@ -6,6 +6,7 @@ import type {
   TransmuteConfig,
   TransmutePreset
 } from '../types'
+import { effectiveLinesCount, linesCountPatch } from '../../../shared/settings'
 
 export const TRANSMUTE_CONFIG_STORAGE_KEY = 'fasttrack.transmute.readerConfig.v1'
 
@@ -146,8 +147,7 @@ export function readerFieldsFromSettings(
     highlightMode: settings.highlight_mode ?? 'default',
     highlightPanningChunkSize: settings.highlight_panning_chunk_size ?? 0,
     highlightingMode: settings.highlighting_mode ?? 'default',
-    linesEnabled: settings.lines_enabled,
-    linesCount: settings.lines_count,
+    linesCount: effectiveLinesCount(settings),
     linesRowGap: settings.lines_row_gap,
     stacksVisible: settings.stacks_visible,
     stackGap: settings.stack_gap,
@@ -182,7 +182,6 @@ function readerFieldsFromReaderConfig(
   | 'highlightMode'
   | 'highlightPanningChunkSize'
   | 'highlightingMode'
-  | 'linesEnabled'
   | 'linesCount'
   | 'linesRowGap'
   | 'stacksVisible'
@@ -207,8 +206,7 @@ function readerFieldsFromReaderConfig(
     highlightMode: readerConfig.highlight_mode ?? 'default',
     highlightPanningChunkSize: readerConfig.highlight_panning_chunk_size ?? 0,
     highlightingMode: readerConfig.highlighting_mode ?? 'default',
-    linesEnabled: readerConfig.lines_enabled,
-    linesCount: readerConfig.lines_count,
+    linesCount: effectiveLinesCount(readerConfig),
     linesRowGap: readerConfig.lines_row_gap,
     stacksVisible: readerConfig.stacks_visible,
     stackGap: readerConfig.stack_gap,
@@ -247,6 +245,7 @@ function normalizeStoredTransmuteConfig(
   if (!raw || typeof raw !== 'object') return defaults
   const r = raw as Record<string, unknown>
   const theme = asTheme(r.theme, defaults.theme)
+  const storedLinesCount = Math.max(1, Math.round(asFiniteNumber(r.linesCount, defaults.linesCount)))
 
   return {
     bpm: clamp(asFiniteNumber(r.bpm, defaults.bpm), TRANSMUTE_BPM_MIN, TRANSMUTE_BPM_MAX),
@@ -273,8 +272,8 @@ function normalizeStoredTransmuteConfig(
       Math.round(asFiniteNumber(r.highlightPanningChunkSize, defaults.highlightPanningChunkSize))
     ),
     highlightingMode: asHighlightingMode(r.highlightingMode, defaults.highlightingMode),
-    linesEnabled: asBoolean(r.linesEnabled, defaults.linesEnabled),
-    linesCount: Math.max(1, Math.round(asFiniteNumber(r.linesCount, defaults.linesCount))),
+    // Pre-LB-5 blobs used linesEnabled=false to force a single rendered row.
+    linesCount: r.linesEnabled === false ? 1 : storedLinesCount,
     linesRowGap: Math.max(0, asFiniteNumber(r.linesRowGap, defaults.linesRowGap)),
     stacksVisible: Math.max(1, Math.round(asFiniteNumber(r.stacksVisible, defaults.stacksVisible))),
     stackGap: Math.max(0, asFiniteNumber(r.stackGap, defaults.stackGap)),
@@ -315,8 +314,9 @@ export function persistTransmuteConfig(config: TransmuteConfig | StoredTransmute
     const {
       textId: _textId,
       segmentId: _segmentId,
+      linesEnabled: _legacyLinesEnabled,
       ...stored
-    } = config as TransmuteConfig
+    } = config as TransmuteConfig & { linesEnabled?: boolean }
     _configStorage.set(TRANSMUTE_CONFIG_STORAGE_KEY, JSON.stringify(stored))
   } catch {
     // Storage is best-effort; rendering should continue even if persistence is unavailable.
@@ -346,8 +346,7 @@ export function transmuteConfigToSettings(
     highlight_mode: config.highlightMode,
     highlight_panning_chunk_size: config.highlightPanningChunkSize,
     highlighting_mode: config.highlightingMode,
-    lines_enabled: config.linesEnabled,
-    lines_count: config.linesCount,
+    ...linesCountPatch(config.linesCount),
     lines_row_gap: config.linesRowGap,
     stacks_visible: config.stacksVisible,
     stack_gap: config.stackGap,

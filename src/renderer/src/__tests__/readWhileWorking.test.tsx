@@ -9,7 +9,8 @@ import { LibraryProvider, useLibrary } from '../contexts/LibraryContext'
 import { ReaderProvider } from '../contexts/ReaderContext'
 import TemporaryReaderApp from '../components/TemporaryReaderApp'
 import Reader from '../components/Reader'
-import type { Settings, TextRecord, AppView, TextSegment } from '../types'
+import type { Settings, TextRecord, TextSegment } from '../types'
+import type { AppView } from '../appShell/routeTable'
 
 afterEach(() => {
   cleanup()
@@ -29,7 +30,6 @@ const BASE_SETTINGS: Settings = {
   stack_horizontal_offset: 0,
   theme: 'dark',
   highlight_active: true,
-  lines_enabled: false,
   lines_count: 1,
   lines_row_gap: 0,
   segmentation_enabled: true,
@@ -245,6 +245,20 @@ async function renderAppShellAtLibraryContents() {
   })
 }
 
+/**
+ * The readiness/error status line (`.rww-readiness-status`), scoped past the
+ * unconditional alpha-notice `role="status"` region now at the top of the
+ * subview (PRD D6) so an unscoped `findByRole('status')` no longer matches
+ * two elements.
+ */
+async function findReadinessStatus(): Promise<HTMLElement> {
+  return waitFor(() => {
+    const el = document.querySelector('.rww-readiness-status')
+    expect(el).toBeTruthy()
+    return el as HTMLElement
+  })
+}
+
 describe('Read while working onboarding', () => {
   it('cold starts on the hub instead of showcase or mode choice', async () => {
     const api = stubApi()
@@ -444,7 +458,7 @@ describe('Read while working onboarding', () => {
 
     expect(api.readWhileWorking.enableAndHideToTray).toHaveBeenCalledOnce()
 
-    expect((await screen.findByRole('status')).textContent).toBe(
+    expect((await findReadinessStatus()).textContent).toBe(
       'Overlay Reader is supported on Windows in this version.'
     )
     expect(screen.getByRole('region', { name: 'Overlay Reader settings' })).toBeTruthy()
@@ -474,7 +488,7 @@ describe('Read while working onboarding', () => {
     const host = document.querySelector('.rww-start-control')
     expect(host?.classList.contains('rww-start-control--blocked')).toBe(true)
     expect(host?.querySelector('.rww-start-control__state-label')?.textContent).toBe('Blocked')
-    expect((await screen.findByRole('status')).textContent).toBe(
+    expect((await findReadinessStatus()).textContent).toBe(
       'Shortcut Control+Space is already in use.'
     )
   })
@@ -528,7 +542,7 @@ describe('Read while working onboarding', () => {
 
     expect(api.readWhileWorking.enableAndHideToTray).toHaveBeenCalledOnce()
 
-    expect((await screen.findByRole('status')).textContent).toBe(
+    expect((await findReadinessStatus()).textContent).toBe(
       'Shortcut Control+Space is already in use.'
     )
     expect(screen.getByRole('region', { name: 'Overlay Reader settings' })).toBeTruthy()
@@ -669,8 +683,35 @@ describe('Read while working settings and temporary reader', () => {
     }
     await act(async () => {})
 
-    expect(api.readWhileWorking.finishTemporarySession).toHaveBeenCalledWith('completed')
+    expect(api.readWhileWorking.finishTemporarySession).toHaveBeenCalledWith()
     expect(screen.queryByRole('dialog', { name: 'Finished' })).toBeNull()
+  })
+
+  it('renders the inherited reader-scope top anchor in the temporary reader', async () => {
+    vi.useFakeTimers()
+    const api = stubApi()
+    api.readWhileWorking.getTemporarySession.mockResolvedValue({
+      session: {
+        id: 'session-anchor',
+        title: 'Top anchored overlay',
+        content: 'one two three four five six seven eight nine ten eleven twelve',
+        createdAt: new Date().toISOString()
+      },
+      settings: {
+        ...BASE_SETTINGS,
+        lines_count: 3,
+        lines_anchor: 'top'
+      }
+    })
+
+    const { container } = render(<TemporaryReaderApp />)
+    await act(async () => {})
+    for (const ms of [1000, 1000, 1000, 100]) {
+      await act(async () => { vi.advanceTimersByTime(ms) })
+    }
+
+    expect(container.querySelector('.reader-stack-rows--top')).not.toBeNull()
+    expect(container.querySelector('.reader-stack-rows--center')).toBeNull()
   })
 
   it('does not close the temporary session during React StrictMode effect replay', async () => {
@@ -695,7 +736,7 @@ describe('Read while working settings and temporary reader', () => {
 
     expect(screen.getByText('3')).toBeTruthy()
     expect(screen.queryByRole('button', { name: 'Browse library' })).toBeNull()
-    expect(api.readWhileWorking.finishTemporarySession).not.toHaveBeenCalledWith('unmounted')
+    expect(api.readWhileWorking.finishTemporarySession).not.toHaveBeenCalled()
   })
 })
 
@@ -870,6 +911,37 @@ describe('Corner chrome — gear control', () => {
       expect(screen.getByRole('button', { name: /edit reader defaults/i })).toBeTruthy()
       expect(document.querySelector('.up-level-control')).toBeNull()
       expect(document.querySelector('.home-control-dove')).toBeTruthy()
+    }
+  )
+
+  // The route table declares the dove on every inner screen that is not the
+  // Reader, the hub or a nested sub-page; "dove -> hub" must stay constant.
+  it.each(['library', 'import', 'make-video', 'add-chapter', 'transmute', 'settings'] as const)(
+    'shows the dove on %s and routes it to the hub',
+    async (view) => {
+      stubApi()
+      await renderAppShellAtView(view)
+
+      expect(document.querySelector('.home-control-dove')).toBeTruthy()
+      expect(document.querySelector('.up-level-control')).toBeNull()
+
+      await act(async () => {
+        fireEvent.click(document.querySelector('.home-control') as HTMLButtonElement)
+      })
+
+      expect(await screen.findByRole('button', { name: 'Read' })).toBeTruthy()
+      expect(document.querySelector('.home-control')).toBeNull()
+    }
+  )
+
+  // The gear is the mirrored corner: present on the plain inner screens, absent
+  // wherever the table says so (Library, Settings, Reader, hub).
+  it.each(['import', 'make-video', 'add-chapter', 'transmute'] as const)(
+    'shows the gear control on %s',
+    async (view) => {
+      stubApi()
+      await renderAppShellAtView(view)
+      expect(document.querySelector('.gear-control')).toBeTruthy()
     }
   )
 

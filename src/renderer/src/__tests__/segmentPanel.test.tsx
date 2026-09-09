@@ -152,6 +152,22 @@ describe('SegmentPanel origin vocabulary', () => {
     expect(screen.queryByText('part')).toBeNull()
   })
 
+  it('uses chapters for EPUB books while keeping the Add Content affordance', () => {
+    // ADR-0034 §8: the two axes are separate. The noun follows the publisher's
+    // structure; mutability follows `seed_id`, which an EPUB book does not have,
+    // so the owner can still append to their own copy. A refactor that collapses
+    // them into one flag fails here.
+    const epubBook = { ...baseText, source_type: 'epub' as const }
+    const { handleOpenAddChapter } = renderPanel(epubBook)
+
+    expect(screen.getByText(/2 chapters/).textContent).toContain('6 words total')
+
+    const addButton = screen.getByRole('button', { name: '+ Add Content' })
+    fireEvent.click(addButton)
+
+    expect(handleOpenAddChapter).toHaveBeenCalledWith(epubBook)
+  })
+
   it('does not render the old inline Library back button', () => {
     renderPanel(baseText)
 

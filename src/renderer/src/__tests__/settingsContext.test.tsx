@@ -27,8 +27,7 @@ const BASE_SETTINGS: Settings = {
   rww_bpm: 90,
   rww_words_per_stack: 2,
   rww_stacks_visible: 1,
-  rww_lines_enabled: false,
-  rww_lines_count: 2,
+  rww_lines_count: 1,
   custom_rww_playback_presets: [],
 }
 

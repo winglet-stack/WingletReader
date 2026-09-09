@@ -7,25 +7,30 @@ import {
   Notification,
   screen
 } from 'electron'
+import { performance } from 'node:perf_hooks'
 import { join, dirname } from 'path'
 import { existsSync } from 'fs'
 import { Database } from './database'
 import {
-  STANDBY_PILL_WINDOW,
+  MAIN_WINDOW_FADE_INTERVAL_MS,
+  MAIN_WINDOW_FADE_MS,
   TEMP_READER_WINDOW_LIMITS,
   clampTemporaryReaderSize,
-  classifyCaptureReadiness,
-  normalizeShortcutInput,
-  resolveStandbyPillBounds,
-  shouldShowStandbyPill,
-  type ReadWhileWorkingStatus,
+  fadeOutOpacityAt,
   type TemporaryReaderSession
 } from './readWhileWorkingCore'
+import {
+  createOverlayReader,
+  type OverlayReaderPort,
+  type OverlayReaderRect,
+  type OverlayReaderSettings,
+  type StandbyPillHandlers
+} from './overlayReader'
 import { registerHandlers, type WindowRefs } from './ipcHandlers'
-import { runSeedLoader } from './seedLibrary'
+import { appChannelContract } from '../shared/channelContract'
 import { startPackagedAutoUpdater } from './updater'
 import log from 'electron-log'
-import { attachTray, buildTrayMenuTemplate, createTrayMenu } from './trayMenu'
+import { attachTray, createTrayMenu } from './trayMenu'
 import { sendEnableFailed, sendNavigateHome } from './rwwNavigation'
 import { captureSelectedText } from './rwwCapture'
 import { resolveStartupSplashOptions } from './splashOptions'
@@ -38,23 +43,11 @@ let mainWindow: BrowserWindow | null = null
 let db: Database
 let tray: ReturnType<typeof attachTray> | null = null
 let allowQuit = false
-let registeredReadWhileWorkingShortcut: string | null = null
-let registeredReadWhileWorkingExitShortcut: string | null = null
-let readWhileWorkingStatus: ReadWhileWorkingStatus = {
-  enabled: false,
-  supported: process.platform === 'win32',
-  registered: false,
-  shortcut: 'Control+Space',
-  exitShortcut: 'Control+Space',
-  exitRegistered: false,
-  error: null,
-  exitError: null
-}
-let captureBusy = false
 let temporaryReaderWindow: BrowserWindow | null = null
 let temporaryReaderSession: TemporaryReaderSession | null = null
 let standbyPillWindow: BrowserWindow | null = null
-let standbyPillPositionTimer: ReturnType<typeof setTimeout> | null = null
+let mainWindowFadeTimer: ReturnType<typeof setInterval> | null = null
+let mainWindowFadeWindow: BrowserWindow | null = null
 
 registerMainProcessCrashLogging()
 
@@ -77,23 +70,6 @@ function attachZoomGuard(win: BrowserWindow): void {
     event.preventDefault()
     wc.setZoomLevel(nextLevel)
   })
-}
-
-// Reader Seed loader (ADR-0018): ingest the curated default-library bundle from
-// resources/ and seed any books new to the permanent ledger. Strictly additive
-// and best-effort — a missing or malformed bundle must never block launch, so any
-// failure is logged and swallowed.
-function seedDefaultLibrary(database: Database): void {
-  try {
-    const seedResult = runSeedLoader(database, join(app.getAppPath(), 'resources'))
-    if (seedResult.ranScan) {
-      log.info(
-        `Seed loader: inserted ${seedResult.seeded.length} book(s), skipped ${seedResult.skipped.length}.`
-      )
-    }
-  } catch (err) {
-    log.error('Seed loader failed (continuing launch):', err)
-  }
 }
 
 function createWindow(showOnReady = true): void {
@@ -125,7 +101,7 @@ function createWindow(showOnReady = true): void {
     if (!allowQuit && db?.getSettings().read_while_working_enabled) {
       event.preventDefault()
       mainWindow?.hide()
-      ensureTray()
+      overlayReader.ensureTray()
     }
   })
 
@@ -193,20 +169,18 @@ app.whenReady().then(() => {
     return
   }
 
-  seedDefaultLibrary(db)
-
   const windowRefs: WindowRefs = {
     get mainWindow() { return mainWindow },
     get temporaryReaderWindow() { return temporaryReaderWindow },
     get temporaryReaderSession() { return temporaryReaderSession },
-    updateReadWhileWorkingRegistration: (s) => updateReadWhileWorkingRegistration(s),
-    ensureTray,
-    enableReadWhileWorkingAndHide,
-    finishTemporaryReaderSession,
-    exitReadWhileWorkingMode
+    updateReadWhileWorkingRegistration: (s) => overlayReader.syncRegistration(s),
+    ensureTray: () => overlayReader.ensureTray(),
+    enableReadWhileWorkingAndHide: () => overlayReader.arm(),
+    finishTemporaryReaderSession: () => overlayReader.finishTemporarySession(),
+    exitReadWhileWorkingMode: (notification) => overlayReader.exit(notification)
   }
   registerHandlers(ipcMain, db, windowRefs)
-  const startupSettings = db.saveSettings({ read_while_working_enabled: false })
+  const startupSettings = overlayReader.clearArmedFlag()
 
   // Cold-start splash coordinator. Packaged builds show the normal brand-floor
   // splash. Dev/tuning boots opt in with SPLASH=1, SPLASH=full, --splash, or
@@ -227,7 +201,7 @@ app.whenReady().then(() => {
       shown = true
       if (mainWindow && !mainWindow.isDestroyed()) mainWindow.show()
     }
-    ipcMain.once('splash:renderer-ready', showMain)
+    ipcMain.once(appChannelContract.splashReady.channel, showMain)
     setTimeout(() => {
       log.warn('[startup] renderer-ready timeout — forcing show')
       showMain()
@@ -310,7 +284,7 @@ app.whenReady().then(() => {
       createWindow(true)
     } else {
       createWindow(false)
-      ipcMain.once('splash:renderer-ready', () => {
+      ipcMain.once(appChannelContract.splashReady.channel, () => {
         mainReady = true
         checkReveal()
       })
@@ -321,11 +295,11 @@ app.whenReady().then(() => {
     }
   }
 
-  updateReadWhileWorkingRegistration(startupSettings)
+  overlayReader.syncRegistration(startupSettings)
   // Packaged builds keep a notification-area icon while the app runs so testers
   // can right-click → Start Read While Working even with the window on screen.
   // Dev is unchanged: the tray only appears while RWW is enabled.
-  if (!isDev()) ensureTray()
+  if (!isDev()) overlayReader.ensureTray()
   startPackagedAutoUpdater(app.isPackaged, portable.portable)
 
   app.on('activate', () => {
@@ -342,12 +316,10 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   allowQuit = true
-  if (db) db.saveSettings({ read_while_working_enabled: false })
-  globalShortcut.unregisterAll()
-  destroyStandbyPillWindow()
+  // Drops the process-lifetime armed flag, releases every global shortcut and
+  // closes the standby pill — the sequencer owns that trio, not this file.
+  overlayReader.shutdownForQuit()
 })
-
-type StoredSettings = ReturnType<Database['getSettings']>
 
 function getTrayIconPath(): string {
   return join(app.getAppPath(), 'resources/logo.png')
@@ -359,10 +331,61 @@ function notifyReadWhileWorking(body: string): void {
   }
 }
 
-function showMainWindow(): void {
-  if (!mainWindow || mainWindow.isDestroyed()) createWindow()
+function raiseMainWindow(): void {
+  cancelMainWindowFade()
   mainWindow?.show()
   mainWindow?.focus()
+}
+
+function restoreMainWindowFadeState(win: BrowserWindow | null): void {
+  if (!win || win.isDestroyed()) return
+  win.setIgnoreMouseEvents(false)
+  win.setOpacity(1)
+}
+
+// Ease the main window to transparent, then hide it, so arming the Overlay Reader
+// reads as the window dissolving into the standby pill rather than vanishing in a
+// single frame. Opacity and input are restored before the next show().
+function fadeOutMainWindowAndHide(): void {
+  const win = mainWindow
+  if (!win || win.isDestroyed()) return
+  cancelMainWindowFade()
+  if (!win.isVisible()) {
+    win.hide()
+    restoreMainWindowFadeState(win)
+    return
+  }
+
+  mainWindowFadeWindow = win
+  win.blur()
+  win.setIgnoreMouseEvents(true)
+
+  const start = performance.now()
+  mainWindowFadeTimer = setInterval(() => {
+    if (win.isDestroyed()) {
+      cancelMainWindowFade()
+      return
+    }
+    const opacity = fadeOutOpacityAt(performance.now() - start, MAIN_WINDOW_FADE_MS)
+    if (opacity !== null) {
+      win.setOpacity(opacity)
+      return
+    }
+    win.hide()
+    cancelMainWindowFade()
+  }, MAIN_WINDOW_FADE_INTERVAL_MS)
+}
+
+// Stop an in-flight fade and restore the same window the fade captured so it
+// never reappears mid-dissolve, stuck transparent, or unable to take clicks.
+function cancelMainWindowFade(): void {
+  const fadingWindow = mainWindowFadeWindow
+  if (mainWindowFadeTimer) {
+    clearInterval(mainWindowFadeTimer)
+    mainWindowFadeTimer = null
+  }
+  mainWindowFadeWindow = null
+  restoreMainWindowFadeState(fadingWindow)
 }
 
 function quitFromTray(): void {
@@ -374,264 +397,36 @@ function quitFromTray(): void {
   app.quit()
 }
 
-function buildTrayMenu() {
-  return createTrayMenu(buildTrayMenuTemplate({
-    rwwEnabled: !!db?.getSettings().read_while_working_enabled,
-    onShow: () => showMainWindow(),
-    onStartReadWhileWorking: () => {
-      const status = enableReadWhileWorkingAndHide()
-      if (!status.supported || !status.registered) {
-        sendEnableFailed(mainWindow, status.error ?? 'Read while working could not be enabled.')
-      }
-    },
-    onExitReadWhileWorking: () => exitReadWhileWorkingMode('Exited Overlay Reader.'),
-    onQuit: () => quitFromTray(),
-  }))
-}
-
-function rebuildTrayMenu(): void {
-  if (tray) tray.setContextMenu(buildTrayMenu())
-}
-
-function ensureTray(): void {
-  if (!tray) {
-    tray = attachTray(getTrayIconPath(), buildTrayMenu(), () => showMainWindow())
-  } else {
-    rebuildTrayMenu()
-  }
-}
-
-function destroyTray(): void {
-  tray?.destroy()
-  tray = null
-}
-
-// Shared enable path for both the Library header button (via the
-// rww:enableAndHideToTray IPC) and the tray "Start Read While Working" item:
-// persist the flag, register shortcuts, then hide on success or re-show the
-// window on failure. Returns the registration status for the caller to surface.
-function enableReadWhileWorkingAndHide(): ReadWhileWorkingStatus {
-  const settings = db.saveSettings({ read_while_working_enabled: true })
-  const status = updateReadWhileWorkingRegistration(settings)
-  if (status.enabled && status.registered) {
-    mainWindow?.hide()
-    createStandbyPillWindow(settings, status)
-  } else {
-    destroyStandbyPillWindow()
-    showMainWindow()
-  }
-  return status
-}
-
-// Mirror of sendNavigateHome: push the enable failure to the renderer so the
-// tray-initiated path can route the user to Global Settings with the error copy,
-// matching the Library button's return-value-driven failure handling.
-
-function unregisterReadWhileWorkingShortcut(): void {
-  if (registeredReadWhileWorkingShortcut) {
-    globalShortcut.unregister(registeredReadWhileWorkingShortcut)
-    registeredReadWhileWorkingShortcut = null
-  }
-  if (registeredReadWhileWorkingExitShortcut) {
-    globalShortcut.unregister(registeredReadWhileWorkingExitShortcut)
-    registeredReadWhileWorkingExitShortcut = null
-  }
-}
-
-function updateReadWhileWorkingRegistration(settings = db.getSettings()): ReadWhileWorkingStatus {
-  const shortcut = normalizeShortcutInput(settings.read_while_working_shortcut ?? 'Control+Space')
-  const exitShortcut = normalizeShortcutInput(settings.read_while_working_exit_shortcut ?? 'Control+Space')
-  unregisterReadWhileWorkingShortcut()
-
-  readWhileWorkingStatus = {
-    enabled: settings.read_while_working_enabled ?? false,
-    supported: process.platform === 'win32',
-    registered: false,
-    shortcut,
-    exitShortcut,
-    exitRegistered: false,
-    error: null,
-    exitError: null
-  }
-
-  if (!settings.read_while_working_enabled) {
-    destroyStandbyPillWindow()
-    // Packaged: keep the always-on tray and refresh its menu back to "Start".
-    // Dev: tear the tray down so it only exists while RWW is enabled.
-    if (isDev()) destroyTray()
-    else rebuildTrayMenu()
-    return readWhileWorkingStatus
-  }
-
-  ensureTray()
-
-  if (process.platform !== 'win32') {
-    readWhileWorkingStatus.error = 'Overlay Reader is supported on Windows in this version.'
-    return readWhileWorkingStatus
-  }
-
-  const ok = globalShortcut.register(shortcut, () => {
-    void handleReadWhileWorkingShortcut()
-  })
-
-  readWhileWorkingStatus.registered = ok
-  readWhileWorkingStatus.error = ok ? null : `Shortcut ${shortcut} is already in use.`
-  if (ok) registeredReadWhileWorkingShortcut = shortcut
-
-  if (exitShortcut === shortcut) {
-    readWhileWorkingStatus.exitRegistered = ok
-    readWhileWorkingStatus.exitError = ok ? null : readWhileWorkingStatus.error
-    return readWhileWorkingStatus
-  }
-
-  const exitOk = globalShortcut.register(exitShortcut, () => {
-    exitReadWhileWorkingMode('Exited Overlay Reader.')
-  })
-
-  readWhileWorkingStatus.exitRegistered = exitOk
-  readWhileWorkingStatus.exitError = exitOk ? null : `Exit shortcut ${exitShortcut} is already in use.`
-  if (exitOk) registeredReadWhileWorkingExitShortcut = exitShortcut
-  return readWhileWorkingStatus
-}
-
-async function handleReadWhileWorkingShortcut(): Promise<void> {
-  const settings = db.getSettings()
-  const readiness = classifyCaptureReadiness({
-    platform: process.platform,
-    enabled: settings.read_while_working_enabled ?? false,
-    busy: captureBusy,
-    hasActiveSession: !!temporaryReaderWindow && !temporaryReaderWindow.isDestroyed()
-  })
-
-  if (!readiness.ok) {
-    if (readiness.reason === 'active-session') temporaryReaderWindow?.focus()
-    if (readiness.reason === 'busy') notifyReadWhileWorking('Already capturing selected text.')
-    if (readiness.reason === 'unsupported') notifyReadWhileWorking('Overlay Reader is supported on Windows in this version.')
-    return
-  }
-
-  captureBusy = true
-  try {
-    const result = await captureSelectedText(settings)
-    // 'no-selection' surfaces a notice only — Read While Working stays running
-    // (shortcuts registered, tray alive). No teardown. A copy keystroke that
-    // throws/times out is handled by the catch below.
-    if (result.kind === 'open') {
-      openTemporaryReaderWindow(result.text, settings)
-    } else {
-      notifyReadWhileWorking('No text selected to read.')
-    }
-  } catch (err) {
-    notifyReadWhileWorking(`Could not capture selected text: ${(err as Error).message}`)
-  } finally {
-    captureBusy = false
-  }
-}
-
-function exitReadWhileWorkingMode(notification?: string): void {
-  const settings = db.saveSettings({ read_while_working_enabled: false })
-  updateReadWhileWorkingRegistration(settings)
-  destroyStandbyPillWindow()
-  finishTemporaryReaderSession()
-
-  if (!mainWindow || mainWindow.isDestroyed()) {
-    createWindow(true)
-  } else {
-    mainWindow.show()
-    mainWindow.focus()
-  }
-
-  // Land on the Library when the main window reappears, regardless of the view it
-  // was last on (or whether it was just recreated). Deterministic counterpart to
-  // the entry-side setView('library') — does not depend on the renderer's view
-  // surviving the hide/show round-trip.
-  sendNavigateHome(mainWindow)
-
-  if (notification) notifyReadWhileWorking(notification)
-}
-
-function getStandbyPillDisplay(settings: StoredSettings): Electron.Display {
-  if (
-    Number.isFinite(settings.read_while_working_standby_x) &&
-    Number.isFinite(settings.read_while_working_standby_y)
-  ) {
-    return screen.getDisplayMatching({
-      x: settings.read_while_working_standby_x!,
-      y: settings.read_while_working_standby_y!,
-      width: STANDBY_PILL_WINDOW.width,
-      height: STANDBY_PILL_WINDOW.height
-    })
-  }
-  return screen.getDisplayNearestPoint(screen.getCursorScreenPoint())
-}
-
-function persistStandbyPillPosition(bounds: Electron.Rectangle): void {
-  if (standbyPillPositionTimer) clearTimeout(standbyPillPositionTimer)
-  standbyPillPositionTimer = setTimeout(() => {
-    standbyPillPositionTimer = null
-    if (!db) return
-    db.saveSettings({
-      read_while_working_standby_x: bounds.x,
-      read_while_working_standby_y: bounds.y
-    })
-  }, 250)
-}
-
-function destroyStandbyPillWindow(): void {
-  if (standbyPillPositionTimer) {
-    clearTimeout(standbyPillPositionTimer)
-    standbyPillPositionTimer = null
-  }
-  const win = standbyPillWindow
-  standbyPillWindow = null
-  if (win && !win.isDestroyed()) win.destroy()
-}
-
-function createStandbyPillWindow(
-  settings = db.getSettings(),
-  status = readWhileWorkingStatus
+function openStandbyPillWindow(
+  bounds: OverlayReaderRect,
+  handlers: StandbyPillHandlers
 ): void {
-  if (!shouldOpenStandbyPillWindow(settings, status)) {
-    destroyStandbyPillWindow()
-    return
-  }
-
-  if (hasActiveStandbyPillWindow()) return
-
-  standbyPillWindow = createStandbyBrowserWindow(resolveStandbyPillWindowBounds(settings))
-  attachStandbyPillWindowEvents(standbyPillWindow)
+  standbyPillWindow = createStandbyBrowserWindow(bounds)
+  attachStandbyPillWindowEvents(standbyPillWindow, handlers)
   loadRendererForWindow(standbyPillWindow, { standbyPill: '1' })
 }
 
-function shouldOpenStandbyPillWindow(
-  settings: StoredSettings,
-  status: ReadWhileWorkingStatus
-): boolean {
-  return shouldShowStandbyPill({
-    enabled: status.enabled,
-    registered: status.registered,
-    showStandbyControl: settings.read_while_working_show_standby_control ?? true
-  })
+function destroyStandbyPillWindow(): void {
+  const win = standbyPillWindow
+  standbyPillWindow = null
+  if (win && !win.isDestroyed()) win.destroy()
 }
 
 function hasActiveStandbyPillWindow(): boolean {
   return !!standbyPillWindow && !standbyPillWindow.isDestroyed()
 }
 
-function resolveStandbyPillWindowBounds(settings: StoredSettings): Electron.Rectangle {
-  const display = getStandbyPillDisplay(settings)
-  return resolveStandbyPillBounds({
-    storedX: settings.read_while_working_standby_x,
-    storedY: settings.read_while_working_standby_y,
-    workArea: display.workArea
-  })
-}
-
-function attachStandbyPillWindowEvents(win: BrowserWindow): void {
+function attachStandbyPillWindowEvents(
+  win: BrowserWindow,
+  handlers: StandbyPillHandlers
+): void {
   win.on('ready-to-show', () => {
     win.showInactive()
   })
-  win.on('moved', handleStandbyPillMoved)
+  win.on('moved', () => {
+    if (win.isDestroyed()) return
+    handlers.onMoved(win.getBounds())
+  })
   win.on('closed', () => {
     if (standbyPillWindow === win) standbyPillWindow = null
   })
@@ -639,13 +434,7 @@ function attachStandbyPillWindowEvents(win: BrowserWindow): void {
   attachLocalNavigationGuard(win, process.env['ELECTRON_RENDERER_URL'])
 }
 
-function handleStandbyPillMoved(): void {
-  const win = standbyPillWindow
-  if (!win || win.isDestroyed()) return
-  persistStandbyPillPosition(win.getBounds())
-}
-
-function createStandbyBrowserWindow(bounds: Electron.Rectangle): BrowserWindow {
+function createStandbyBrowserWindow(bounds: OverlayReaderRect): BrowserWindow {
   return new BrowserWindow({
     ...bounds,
     show: false,
@@ -682,12 +471,7 @@ function loadRendererForWindow(win: BrowserWindow, query?: Record<string, string
   }
 }
 
-function openTemporaryReaderWindow(content: string, settings: StoredSettings): void {
-  if (temporaryReaderWindow && !temporaryReaderWindow.isDestroyed()) {
-    temporaryReaderWindow.focus()
-    return
-  }
-
+function openTemporaryReaderWindow(content: string, settings: OverlayReaderSettings): void {
   const size = clampTemporaryReaderSize(
     settings.read_while_working_window_width ?? 640,
     settings.read_while_working_window_height ?? 360
@@ -735,10 +519,74 @@ function openTemporaryReaderWindow(content: string, settings: StoredSettings): v
   })
 }
 
-function finishTemporaryReaderSession(): { ok: boolean } {
+function destroyTemporaryReaderWindow(): void {
   const win = temporaryReaderWindow
   temporaryReaderWindow = null
   temporaryReaderSession = null
   if (win && !win.isDestroyed()) win.destroy()
-  return { ok: true }
 }
+
+function hasActiveTemporaryReaderWindow(): boolean {
+  return !!temporaryReaderWindow && !temporaryReaderWindow.isDestroyed()
+}
+
+// ── Overlay Reader adapter ───────────────────────────────────────────────────
+// The real half of the two adapters behind `OverlayReaderPort` (the other lives
+// in `__tests__/overlayReader.test.ts`). Every member here is a primitive that
+// touches Electron; not one of them decides *when* it runs. The sequencing —
+// arm, capture, present, exit, disarm, the standby-pill lifecycle, shortcut
+// registration and its failure states — lives in `overlayReader.ts`, which is
+// why it can be tested without an Electron process.
+const overlayReaderPort: OverlayReaderPort = {
+  platform: process.platform,
+  isDev: () => isDev(),
+
+  getSettings: () => db?.getSettings() ?? {},
+  saveSettings: (patch) => db?.saveSettings(patch) ?? { ...patch },
+
+  registerShortcut: (accelerator, handler) => globalShortcut.register(accelerator, handler),
+  unregisterShortcut: (accelerator) => globalShortcut.unregister(accelerator),
+  unregisterAllShortcuts: () => globalShortcut.unregisterAll(),
+
+  ensureTray: (template, onClick) => {
+    if (!tray) tray = attachTray(getTrayIconPath(), createTrayMenu(template), onClick)
+    else tray.setContextMenu(createTrayMenu(template))
+  },
+  setTrayMenu: (template) => {
+    if (tray) tray.setContextMenu(createTrayMenu(template))
+  },
+  destroyTray: () => {
+    tray?.destroy()
+    tray = null
+  },
+
+  isMainWindowAlive: () => !!mainWindow && !mainWindow.isDestroyed(),
+  createMainWindow: (showOnReady) => createWindow(showOnReady),
+  raiseMainWindow,
+  fadeOutMainWindowAndHide,
+  navigateHome: () => sendNavigateHome(mainWindow),
+  // Mirror of sendNavigateHome: push the enable failure to the renderer so the
+  // tray-initiated path can route the user to Overlay Reader settings with the
+  // error copy, matching the Start control's return-value-driven handling.
+  sendEnableFailed: (error) => sendEnableFailed(mainWindow, error),
+
+  getWorkArea: (anchor) =>
+    (anchor
+      ? screen.getDisplayMatching(anchor)
+      : screen.getDisplayNearestPoint(screen.getCursorScreenPoint())
+    ).workArea,
+  isStandbyPillOpen: hasActiveStandbyPillWindow,
+  openStandbyPill: openStandbyPillWindow,
+  closeStandbyPill: destroyStandbyPillWindow,
+
+  hasTemporaryReaderWindow: hasActiveTemporaryReaderWindow,
+  focusTemporaryReader: () => temporaryReaderWindow?.focus(),
+  openTemporaryReader: openTemporaryReaderWindow,
+  destroyTemporaryReader: destroyTemporaryReaderWindow,
+
+  captureSelectedText: (settings) => captureSelectedText(settings),
+  notify: notifyReadWhileWorking,
+  quitApp: quitFromTray
+}
+
+const overlayReader = createOverlayReader(overlayReaderPort)

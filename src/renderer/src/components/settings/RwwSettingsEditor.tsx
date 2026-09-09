@@ -16,6 +16,8 @@ import SettingsLabel from './SettingsLabel'
 import SliderField from './instruments/SliderField'
 import { toRwwFlatPatch } from '../../engine/reader-configs'
 import { settingMeta } from './settingMetadata'
+import AlphaNotice from '../AlphaNotice'
+import { alphaChrome } from '../../alphaChrome'
 
 /** Top-level (non-projected) accelerator patch saved through the readiness path. */
 export type RwwShortcutPatch =
@@ -619,6 +621,13 @@ export default function RwwSettingsEditor({
 
   return (
     <div className="rse-console rww-settings-editor">
+      <AlphaNotice
+        enabled={alphaChrome.rwwExperimentalBannerEnabled}
+        label="Read While Working experimental warning"
+        style={{ marginBottom: '12px' }}
+      >
+        {alphaChrome.rwwExperimentalBannerCopy}
+      </AlphaNotice>
       <RwwSettingsTabBar
         activeTabId={activeTabId}
         onTabChange={handleTabChange}

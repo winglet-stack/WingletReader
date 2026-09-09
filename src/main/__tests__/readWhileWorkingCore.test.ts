@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import {
+  MAIN_WINDOW_FADE_MS,
   clampTemporaryReaderSize,
   classifyCaptureReadiness,
+  fadeOutOpacityAt,
   formatShortcutForDisplay,
   interpretCapture,
   normalizeShortcutInput,
@@ -49,6 +51,32 @@ describe('read while working core helpers', () => {
       registered: false,
       showStandbyControl: true
     })).toBe(false)
+  })
+
+  it('starts the main window fade at full opacity', () => {
+    expect(fadeOutOpacityAt(0)).toBe(1)
+  })
+
+  it('decreases main window fade opacity monotonically across the span', () => {
+    const quarter = fadeOutOpacityAt(MAIN_WINDOW_FADE_MS * 0.25)
+    const half = fadeOutOpacityAt(MAIN_WINDOW_FADE_MS * 0.5)
+    const threeQuarter = fadeOutOpacityAt(MAIN_WINDOW_FADE_MS * 0.75)
+
+    expect(quarter).toBeLessThan(1)
+    expect(half).toBeLessThan(quarter as number)
+    expect(threeQuarter).toBeLessThan(half as number)
+    expect(threeQuarter).toBeGreaterThan(0)
+  })
+
+  it('returns null when the main window fade is complete', () => {
+    expect(fadeOutOpacityAt(MAIN_WINDOW_FADE_MS)).toBeNull()
+    expect(fadeOutOpacityAt(MAIN_WINDOW_FADE_MS + 500)).toBeNull()
+  })
+
+  it('clamps main window fade elapsed time at both ends', () => {
+    expect(fadeOutOpacityAt(-50)).toBe(1)
+    expect(fadeOutOpacityAt(Number.NEGATIVE_INFINITY)).toBe(1)
+    expect(fadeOutOpacityAt(MAIN_WINDOW_FADE_MS * 10)).toBeNull()
   })
 
   it('places the standby pill bottom-right by default', () => {

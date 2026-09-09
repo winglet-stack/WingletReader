@@ -6,14 +6,20 @@ import { useReader } from './contexts/ReaderContext'
 import type { ReadWhileWorkingStatus, Settings } from './types'
 import SummarySetupModal from './components/SummarySetupModal'
 import SummaryPromptModal from './components/SummaryPromptModal'
-import { isAlphaDeadRoute } from './alphaChrome'
 import HomeControl from './components/shell/HomeControl'
 import UpLevelControl from './components/shell/UpLevelControl'
 import GearControl from './components/shell/GearControl'
 import RwwStartControl from './components/settings/RwwStartControl'
 import type { RwwSettingsTabId } from './components/settings/RwwSettingsEditor'
-import HubView from './components/hub/HubView'
 import AppShellMainContent from './appShell/AppShellMainContent'
+import { useAppShellMainContentModel } from './appShell/useAppShellMainContentModel'
+import {
+  FALLBACK_VIEW,
+  ROUTE_TABLE,
+  resolveRoute,
+  type RouteRenderContext,
+  type UpLevelTarget
+} from './appShell/routeTable'
 import { readWhileWorkingStatusError } from './engine/shortcutCapture'
 import {
   useAppShellDocumentEffects,
@@ -184,73 +190,74 @@ export default function AppShell() {
     settings.read_while_working_shortcut,
   ])
 
-  const { fullscreenActive, appVersion } = useAppShellDocumentEffects(
-    view,
-    setView,
-    settings.theme
-  )
+  const { fullscreenActive, appVersion } = useAppShellDocumentEffects(settings.theme)
 
   useReadWhileWorkingEnableFailed(setShellError, openGlobalSettings)
+
+  const model = useAppShellMainContentModel(shellError, setShellError)
+
+  const navigateUp = useCallback((target: UpLevelTarget) => {
+    if (target === 'hub') {
+      setView('hub')
+      return
+    }
+    if (target === 'library-list') {
+      setLibraryTab('list')
+      return
+    }
+    setSettingsSubview(null)
+  }, [setLibraryTab, setSettingsSubview, setView])
 
   if (loading) {
     return <div className="app-loading"><span>Loading WingletReader…</span></div>
   }
 
-  if (isAlphaDeadRoute(view)) {
-    return null
+  // The single dead-route enforcement point: an unknown or non-live token lands
+  // on the fallback destination here, and nowhere else.
+  const route = resolveRoute(view, ROUTE_TABLE, FALLBACK_VIEW)
+
+  const renderContext: RouteRenderContext = {
+    model,
+    appVersion,
+    rwwStatus,
+    onSaveRwwShortcut: handleSaveRwwShortcut,
+    rwwHostChrome: {
+      status: rwwStatus,
+      starting: rwwStarting,
+      exiting: rwwExiting,
+      onStart: handleStartOverlayReader,
+      onExit: handleExitOverlayReader,
+    },
+    onRwwSettingsTabChange: handleRwwSettingsTabChange,
+  }
+  const body = route.definition.render(renderContext)
+
+  // A `window` destination (the hub, ADR-0011) owns the whole window: no shell
+  // chrome, no main-content region, no shell-owned modals.
+  if (route.definition.layout === 'window') {
+    return <div className={`app-shell theme-${settings.theme}`}>{body}</div>
   }
 
-  // The hub (ADR-0011) is the device-face root: it owns the whole window.
-  if (view === 'hub') {
-    return (
-      <div className={`app-shell theme-${settings.theme}`}>
-        <HubView appVersion={appVersion} />
-      </div>
-    )
-  }
-
-  const showInnerChrome = view !== 'reader'
-  const showSettingsUpLevel = view === 'settings' && settingsSubview !== null
-  const showLibraryContentsUpLevel = view === 'library' && libraryTab === 'chapters'
-  const settingsUpLevelLabel =
-    settingsSubview === 'overlay-reader' && settingsSubviewOrigin === 'hub'
-      ? 'Back to home'
-      : 'Back to Settings'
-  const handleSettingsUpLevel = () => {
-    if (settingsSubview === 'overlay-reader' && settingsSubviewOrigin === 'hub') {
-      setView('hub')
-      return
-    }
-    setSettingsSubview(null)
-  }
+  const chrome = route.definition.chrome({
+    libraryTab,
+    settingsSubview,
+    settingsSubviewOrigin,
+    rwwSettingsTab,
+  })
+  const corner = chrome.corner
 
   return (
     <div
       className={`app-shell theme-${settings.theme}${fullscreenActive ? ' app-shell--fullscreen' : ''}`}
     >
-      {/* Persistent top-left corner. Reader is exempt - it keeps its own Back. */}
-      {showInnerChrome && (
-        showSettingsUpLevel ? (
-          <UpLevelControl
-            onNavigateUp={handleSettingsUpLevel}
-            label={settingsUpLevelLabel}
-          />
-        ) : showLibraryContentsUpLevel ? (
-          <UpLevelControl
-            onNavigateUp={() => setLibraryTab('list')}
-            label="Back to library"
-          />
-        ) : (
-          <HomeControl onNavigateHome={() => setView('hub')} />
-        )
+      {/* Persistent top-left corner, per the table. Reader declares none. */}
+      {corner.kind === 'home' && <HomeControl onNavigateHome={() => setView('hub')} />}
+      {corner.kind === 'up-level' && (
+        <UpLevelControl onNavigateUp={() => navigateUp(corner.up)} label={corner.label} />
       )}
-      {/* Gear corner (top-right → Settings). Hidden on Library and Settings. */}
-      {showInnerChrome && view !== 'library' && view !== 'settings' && (
-        <GearControl onOpenSettings={openGlobalSettings} />
-      )}
-      {view === 'settings' &&
-        settingsSubview === 'overlay-reader' &&
-        rwwSettingsTab === 'playback-grid' && (
+      {/* Gear corner (top-right → Settings). */}
+      {chrome.gear && <GearControl onOpenSettings={openGlobalSettings} />}
+      {chrome.rwwStartControl && (
         <RwwStartControl
           variant="viewport"
           status={rwwStatus}
@@ -261,20 +268,7 @@ export default function AppShell() {
         />
       )}
 
-      <AppShellMainContent
-        shellError={shellError}
-        setShellError={setShellError}
-        rwwStatus={rwwStatus}
-        onSaveRwwShortcut={handleSaveRwwShortcut}
-        rwwHostChrome={{
-          status: rwwStatus,
-          starting: rwwStarting,
-          exiting: rwwExiting,
-          onStart: handleStartOverlayReader,
-          onExit: handleExitOverlayReader,
-        }}
-        onRwwSettingsTabChange={handleRwwSettingsTabChange}
-      />
+      <AppShellMainContent model={model}>{body}</AppShellMainContent>
 
       {showSummarySetup && (
         <SummarySetupModal

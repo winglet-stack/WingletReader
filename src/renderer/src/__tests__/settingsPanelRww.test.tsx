@@ -33,8 +33,8 @@ const BASE_SETTINGS: Settings = {
   stack_horizontal_offset: 0,
   theme: 'dark',
   highlight_active: true,
-  lines_enabled: false,
-  lines_count: 3,
+  lines_count: 1,
+  lines_anchor: 'center',
   lines_row_gap: 8,
   segmentation_enabled: true,
   segmentation_threshold: 5000,
@@ -70,8 +70,7 @@ const BASE_SETTINGS: Settings = {
   rww_bpm: 90,
   rww_words_per_stack: 2,
   rww_stacks_visible: 1,
-  rww_lines_enabled: false,
-  rww_lines_count: 2,
+  rww_lines_count: 1,
   custom_rww_playback_presets: [],
   custom_palettes: [],
   custom_text_presets: [],
@@ -282,6 +281,9 @@ describe('SettingsPanel — Read While Working entry', () => {
     fireEvent.click(screen.getByRole('tab', { name: 'Reader configuration' }))
     expect(screen.getByRole('slider', { name: 'Speed' })).toBeTruthy()
     expect(screen.getByRole('spinbutton', { name: 'Words per stack value' })).toBeTruthy()
+    expect((screen.getByRole('spinbutton', { name: 'Line count value' }) as HTMLInputElement).value).toBe('1')
+    expect(screen.queryByText('Multiple lines')).toBeNull()
+    expect(screen.queryByRole('group', { name: 'Anchor' })).toBeNull()
     expect(screen.getByRole('slider', { name: 'Font size' })).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Preview' })).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Copy from Reader defaults' })).toBeTruthy()
@@ -293,14 +295,12 @@ describe('SettingsPanel — Read While Working entry', () => {
         bpm: 140,
         words_per_stack: 5,
         stacks_visible: 2,
-        lines_enabled: true,
         lines_count: 4,
         font_size: 44,
         rww_bpm: 60,
         rww_words_per_stack: 1,
         rww_stacks_visible: 1,
-        rww_lines_enabled: false,
-        rww_lines_count: 2,
+        rww_lines_count: 1,
         rww_font_size: 20,
         read_while_working_window_width: 777,
       },
@@ -320,7 +320,6 @@ describe('SettingsPanel — Read While Working entry', () => {
     expect(savedStore.rww.bpm).toBe(savedStore.reader.bpm)
     expect(savedStore.rww.words_per_stack).toBe(savedStore.reader.words_per_stack)
     expect(savedStore.rww.stacks_visible).toBe(savedStore.reader.stacks_visible)
-    expect(savedStore.rww.lines_enabled).toBe(savedStore.reader.lines_enabled)
     expect(savedStore.rww.lines_count).toBe(savedStore.reader.lines_count)
     expect(savedStore.rww.font_size).toBe(savedStore.reader.font_size)
     expect(savedStore.rww.read_while_working_window_width).toBe(777)

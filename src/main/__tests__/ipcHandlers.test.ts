@@ -14,6 +14,11 @@ import type { Database } from '../database'
 import type { ReadWhileWorkingStatus } from '../readWhileWorkingCore'
 import type { PortableProvisioningResult } from '../portableProvisioning'
 import { PORTABLE_MARKER_FILENAME } from '../portableMode'
+import { bookEpub, makeEpub } from './epubFixtures'
+import {
+  invokeChannelNames,
+  readWhileWorkingChannelContract
+} from '../../shared/channelContract'
 
 vi.mock('electron', () => ({
   app: {
@@ -30,56 +35,13 @@ import { dialog } from 'electron'
 import { registerHandlers } from '../ipcHandlers'
 import { settingsStoreFromFlat } from '../../shared/settings'
 
-// ── Exhaustive channel list (must match preload exactly) ───────────────────
-const EXPECTED_CHANNELS = [
-  'app:getVersion',
-  'db:getTexts',
-  'db:getText',
-  'db:saveText',
-  'db:deleteText',
-  'db:getCategories',
-  'db:saveCategory',
-  'db:deleteCategory',
-  'db:assignTextCategory',
-  'db:getSegments',
-  'db:getSegment',
-  'db:saveSegments',
-  'db:updateSegmentTitle',
-  'db:deleteSegments',
-  'db:deleteSegment',
-  'db:appendSegment',
-  'db:createChapterFromPassage',
-  'db:getBookmarks',
-  'db:saveBookmark',
-  'db:updateBookmarkLabel',
-  'db:deleteBookmark',
-  'db:getSummaries',
-  'db:saveSummary',
-  'db:deleteSummary',
-  'db:getSummaryQuestionsForText',
-  'db:saveSummaryQuestion',
-  'db:deleteSummaryQuestion',
-  'db:getReadingPosition',
-  'db:getLatestResumeCandidate',
-  'db:getBookResumeTarget',
-  'db:saveReadingPosition',
-  'db:getSettings',
-  'db:saveSettings',
-  'db:getSettingsStore',
-  'db:saveSettingsStore',
-  'rww:getStatus',
-  'rww:hideToTray',
-  'rww:enableAndHideToTray',
-  'rww:getTemporarySession',
-  'rww:finishTemporarySession',
-  'rww:exit',
-  'file:open',
-  'export:all',
-  'import:json',
-  'portable:selectTarget',
-  'portable:createDrive',
-  'video:save'
-]
+// ── Exhaustive channel list ────────────────────────────────────────────────
+// Derived, not re-typed (issue 03). The list still earns its place: types
+// cannot see that `registerHandlers` actually *called* `ipc.handle` for a
+// channel, so this catches a contract channel with no registration behind it
+// (renderer would reject at runtime) and a registration for a channel the
+// contract never declared (nothing can call it).
+const EXPECTED_CHANNELS = invokeChannelNames
 
 // ── Test factories ─────────────────────────────────────────────────────────
 
@@ -126,12 +88,18 @@ function makeDb(overrides: Partial<Record<string, unknown>> = {}): Database {
     getLatestResumeCandidate: vi.fn(() => null),
     getBookResumeTarget: vi.fn(() => null),
     saveReadingPosition: vi.fn(() => null),
+    importCategories: vi.fn(() => new Map<number, number>()),
+    recordSessionStats: vi.fn(() => undefined),
+    getStatsOverview: vi.fn(() => ({ overview: 'stats' })),
+    getStatsDays: vi.fn(() => []),
+    getTodaySessionStats: vi.fn(() => []),
+    getStatsCollection: vi.fn(() => ({ days: [], sessions: [] })),
+    replaceStats: vi.fn(() => undefined),
     getStorePath: vi.fn(() => join(process.cwd(), 'fasttrack-data.json')),
     getSettings: vi.fn(() => ({
       bpm: 300,
       words_per_stack: 3,
       stacks_visible: 2,
-      lines_enabled: false,
       lines_count: 1
     })),
     saveSettings: vi.fn((s: unknown) => s),
@@ -396,6 +364,414 @@ describe('portable:selectTarget handler', () => {
   })
 })
 
+// ── Winglet Book import (WB-2a) ────────────────────────────────────────────
+
+describe('file:open handler — Winglet Book routing', () => {
+  let dir: string
+
+  beforeEach(() => {
+    vi.mocked(dialog.showOpenDialog).mockReset()
+    dir = mkdtempSync(join(tmpdir(), 'wingletreader-fileopen-'))
+    tempRoots.push(dir)
+  })
+
+  function pick(filePath: string): void {
+    vi.mocked(dialog.showOpenDialog).mockResolvedValueOnce({ canceled: false, filePaths: [filePath] })
+  }
+
+  it('offers .wbook and .epub in the picker filters alongside txt/docx/pdf', async () => {
+    const filePath = join(dir, 'notes.txt')
+    writeFileSync(filePath, 'Alpha beta gamma.', 'utf-8')
+    pick(filePath)
+    const { ipc, handlers } = makeIpc()
+    registerHandlers(ipc, makeDb(), makeWindows({ mainWindow: { hide: vi.fn() } }))
+
+    await handlers.get('file:open')!(null)
+
+    const call = vi.mocked(dialog.showOpenDialog).mock.calls[0] as unknown as [
+      unknown,
+      { filters?: Array<{ name: string; extensions: string[] }> }
+    ]
+    const filters = call[1].filters ?? []
+    expect(filters[0].extensions).toEqual(['txt', 'docx', 'pdf', 'wbook', 'epub'])
+    expect(filters.map((f) => f.name)).toContain('Winglet Book')
+    expect(filters.map((f) => f.name)).toContain('EPUB Book')
+  })
+
+  it('routes a picked .epub to the EPUB door without parsing it (EP-4a)', async () => {
+    // Deliberately not an archive at all: routing is extension-only, so the
+    // picker must hand the path over unread and let `import:epubParse` judge it.
+    const filePath = join(dir, 'middlemarch.epub')
+    writeFileSync(filePath, 'not really a zip', 'utf-8')
+    pick(filePath)
+    const { ipc, handlers } = makeIpc()
+    registerHandlers(ipc, makeDb(), makeWindows({ mainWindow: { hide: vi.fn() } }))
+
+    expect(await handlers.get('file:open')!(null)).toEqual({
+      kind: 'epub-book',
+      fileName: 'middlemarch.epub',
+      filePath
+    })
+  })
+
+  it('routes a picked .wbook to the Winglet Book door instead of the text parser', async () => {
+    const filePath = join(dir, 'the-lighthouse-keeper.wbook')
+    writeFileSync(filePath, '{"format":"winglet-book"}', 'utf-8')
+    pick(filePath)
+    const { ipc, handlers } = makeIpc()
+    registerHandlers(ipc, makeDb(), makeWindows({ mainWindow: { hide: vi.fn() } }))
+
+    expect(await handlers.get('file:open')!(null)).toEqual({
+      kind: 'winglet-book',
+      fileName: 'the-lighthouse-keeper.wbook',
+      filePath
+    })
+  })
+
+  it('leaves the txt flow intact', async () => {
+    const filePath = join(dir, 'notes.txt')
+    writeFileSync(filePath, 'Alpha beta gamma.', 'utf-8')
+    pick(filePath)
+    const { ipc, handlers } = makeIpc()
+    registerHandlers(ipc, makeDb(), makeWindows({ mainWindow: { hide: vi.fn() } }))
+
+    const result = (await handlers.get('file:open')!(null)) as {
+      kind: string
+      fileName: string
+      content: string
+      ext: string
+    }
+
+    expect(result.kind).toBe('text-file')
+    expect(result.fileName).toBe('notes.txt')
+    expect(result.ext).toBe('txt')
+    expect(result.content).toContain('Alpha beta gamma.')
+  })
+})
+
+describe('import:wbook* handlers', () => {
+  let dir: string
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'wingletreader-wbook-ipc-'))
+    tempRoots.push(dir)
+  })
+
+  function makeStoreDb() {
+    return makeDb({
+      hasSeedId: vi.fn(() => false),
+      getCategories: vi.fn(() => [{ id: 1, name: 'Uncategorized', is_system: true }]),
+      importCategories: vi.fn(() => new Map()),
+      saveSegments: vi.fn(() => [])
+    })
+  }
+
+  function validWbook() {
+    return {
+      format: 'winglet-book',
+      schemaVersion: 2,
+      book: {
+        seedId: 'the-lighthouse-keeper',
+        title: 'The Lighthouse Keeper',
+        categoryRef: 'Fiction',
+        segments: [{ title: 'The Wreck', content: 'The lamp had not been lit.' }]
+      }
+    }
+  }
+
+  it('returns the confirm-card envelope without writing anything', async () => {
+    const filePath = join(dir, 'book.wbook')
+    writeFileSync(filePath, JSON.stringify(validWbook()), 'utf-8')
+    const { ipc, handlers } = makeIpc()
+    const db = makeStoreDb()
+    registerHandlers(ipc, db, makeWindows())
+
+    expect(await handlers.get('import:wbookParse')!(null, filePath)).toEqual({
+      status: 'accepted',
+      filePath,
+      confirmation: {
+        seedId: 'the-lighthouse-keeper',
+        title: 'The Lighthouse Keeper',
+        chapterCount: 1,
+        categoryName: 'Fiction'
+      }
+    })
+    expect(db.saveText).not.toHaveBeenCalled()
+    expect(db.saveSegments).not.toHaveBeenCalled()
+    expect(db.saveCategory).not.toHaveBeenCalled()
+    expect(db.importCategories).not.toHaveBeenCalled()
+  })
+
+  it('never rejects across IPC — a foreign file comes back as a verdict', async () => {
+    const filePath = join(dir, 'backup.wbook')
+    writeFileSync(filePath, JSON.stringify({ texts: [] }), 'utf-8')
+    const { ipc, handlers } = makeIpc()
+    registerHandlers(ipc, makeStoreDb(), makeWindows())
+
+    expect(await handlers.get('import:wbookParse')!(null, filePath)).toEqual({
+      status: 'foreign',
+      filePath
+    })
+    expect(await handlers.get('import:wbookParse')!(null, undefined)).toMatchObject({
+      status: 'malformed'
+    })
+  })
+
+  it('commits through the ordinary store paths and answers with the new id', async () => {
+    const filePath = join(dir, 'book.wbook')
+    writeFileSync(filePath, JSON.stringify(validWbook()), 'utf-8')
+    const { ipc, handlers } = makeIpc()
+    const db = makeStoreDb()
+    registerHandlers(ipc, db, makeWindows())
+
+    // The shared book-intake success envelope, same as `import:epubCommit`.
+    expect(await handlers.get('import:wbookCommit')!(null, filePath)).toEqual({
+      status: 'committed',
+      filePath,
+      textId: 1
+    })
+    expect(db.importCategories).toHaveBeenCalledWith([{ id: 1, name: 'Fiction' }])
+    expect(db.saveText).toHaveBeenCalledWith({
+      title: 'The Lighthouse Keeper',
+      content: 'The lamp had not been lit.',
+      seed_id: 'the-lighthouse-keeper',
+      category_id: undefined
+    })
+    expect(db.saveSegments).toHaveBeenCalledWith(1, [
+      {
+        title: 'The Wreck',
+        content: 'The lamp had not been lit.',
+        order: 0,
+        sourceType: 'detected_heading',
+        word_count: 6,
+        startWordOffset: 0,
+        endWordOffset: 6
+      }
+    ])
+  })
+
+  it('never rejects across IPC on commit either, and writes nothing when it refuses', async () => {
+    const filePath = join(dir, 'backup.wbook')
+    writeFileSync(filePath, JSON.stringify({ texts: [] }), 'utf-8')
+    const { ipc, handlers } = makeIpc()
+    const db = makeStoreDb()
+    registerHandlers(ipc, db, makeWindows())
+
+    expect(await handlers.get('import:wbookCommit')!(null, filePath)).toEqual({
+      status: 'foreign',
+      filePath
+    })
+    expect(await handlers.get('import:wbookCommit')!(null, undefined)).toMatchObject({
+      status: 'malformed'
+    })
+    expect(db.saveText).not.toHaveBeenCalled()
+    expect(db.saveSegments).not.toHaveBeenCalled()
+  })
+})
+
+describe('import:epub* handlers', () => {
+  let dir: string
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'wingletreader-epub-ipc-'))
+    tempRoots.push(dir)
+  })
+
+  const CHAPTERS = [
+    { body: '<h1>The Wreck</h1><p>The lamp had not been lit.</p>' },
+    { body: '<h1>The Flare</h1><p>A green flare cut the fog.</p>' }
+  ]
+
+  /** A two-chapter EPUB 3 book on disk, built by the EP-2b fixture helpers. */
+  function validEpub(fileName = 'book.epub'): Promise<string> {
+    return makeEpub(
+      dir,
+      fileName,
+      bookEpub({
+        title: 'The Lighthouse Keeper',
+        creator: 'A. Keeper',
+        chapters: CHAPTERS,
+        nav: [
+          { label: 'The Wreck', href: 'c1.xhtml' },
+          { label: 'The Flare', href: 'c2.xhtml' }
+        ]
+      })
+    )
+  }
+
+  it('returns the confirm-card envelope without writing anything', async () => {
+    const filePath = await validEpub()
+    const { ipc, handlers } = makeIpc()
+    const db = makeDb({ saveSegments: vi.fn(() => []) })
+    registerHandlers(ipc, db, makeWindows())
+
+    expect(await handlers.get('import:epubParse')!(null, filePath)).toEqual({
+      status: 'accepted',
+      filePath,
+      confirmation: {
+        title: 'The Lighthouse Keeper',
+        author: 'A. Keeper',
+        chapterCount: 2,
+        wordCount: 16,
+        imagesOmitted: 0
+      }
+    })
+    expect(db.saveText).not.toHaveBeenCalled()
+    expect(db.saveSegments).not.toHaveBeenCalled()
+  })
+
+  it('commits through the ordinary store paths and answers with the new textId', async () => {
+    const filePath = await validEpub()
+    const { ipc, handlers } = makeIpc()
+    const db = makeDb({ saveSegments: vi.fn(() => []) })
+    registerHandlers(ipc, db, makeWindows())
+
+    expect(await handlers.get('import:epubCommit')!(null, filePath)).toEqual({
+      status: 'committed',
+      filePath,
+      textId: 1
+    })
+    expect(db.saveText).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: 'The Lighthouse Keeper',
+        author: 'A. Keeper',
+        source_type: 'epub',
+        content: 'The Wreck\n\nThe lamp had not been lit.\n\nThe Flare\n\nA green flare cut the fog.'
+      })
+    )
+    expect(db.saveSegments).toHaveBeenCalledWith(1, [
+      {
+        title: 'The Wreck',
+        content: 'The Wreck\n\nThe lamp had not been lit.',
+        order: 0,
+        sourceType: 'detected_heading',
+        word_count: 8,
+        startWordOffset: 0,
+        endWordOffset: 8
+      },
+      {
+        title: 'The Flare',
+        content: 'The Flare\n\nA green flare cut the fog.',
+        order: 1,
+        sourceType: 'detected_heading',
+        word_count: 8,
+        startWordOffset: 8,
+        endWordOffset: 16
+      }
+    ])
+  })
+
+  it('never rejects across IPC — refusals come back as verdicts and write nothing', async () => {
+    const damaged = join(dir, 'damaged.epub')
+    writeFileSync(damaged, 'not a zip at all', 'utf-8')
+    const { ipc, handlers } = makeIpc()
+    const db = makeDb({ saveSegments: vi.fn(() => []) })
+    registerHandlers(ipc, db, makeWindows())
+
+    expect(await handlers.get('import:epubParse')!(null, damaged)).toMatchObject({
+      status: 'malformed',
+      filePath: damaged
+    })
+    expect(await handlers.get('import:epubCommit')!(null, damaged)).toMatchObject({
+      status: 'malformed'
+    })
+    expect(await handlers.get('import:epubCommit')!(null, undefined)).toMatchObject({
+      status: 'malformed'
+    })
+    expect(db.saveText).not.toHaveBeenCalled()
+    expect(db.saveSegments).not.toHaveBeenCalled()
+  })
+})
+
+// ── Export / import of reading history (ADR-0035 §7) ───────────────────────
+
+describe('export:all / import:json — stats', () => {
+  let dir: string
+
+  const statsFixture = {
+    days: [
+      {
+        date: '2026-08-11',
+        wordsRead: 1400,
+        wallMs: 900_000,
+        activeMs: 780_000,
+        pauses: 3,
+        rewinds: 1,
+        sessionCount: 2,
+        longestSessionMs: 540_000,
+        bestSessionFluency: 82,
+        quotaTargetWords: 1000,
+        weeklyTargetDays: 5,
+        quotaMet: true,
+        points: 12
+      }
+    ],
+    sessions: [
+      {
+        textId: 4,
+        title: 'Today’s book',
+        startedAt: 1_700_000_000_000,
+        endedAt: 1_700_000_600_000,
+        activeMs: 540_000,
+        wordsRead: 900,
+        pauses: 1,
+        rewinds: 0
+      }
+    ]
+  }
+
+  beforeEach(() => {
+    vi.mocked(dialog.showOpenDialog).mockReset()
+    vi.mocked(dialog.showSaveDialog).mockReset()
+    dir = mkdtempSync(join(tmpdir(), 'wingletreader-export-'))
+    tempRoots.push(dir)
+  })
+
+  function importing(payload: unknown): { handlers: HandlerMap; db: Database } {
+    const filePath = join(dir, 'import.json')
+    writeFileSync(filePath, JSON.stringify(payload), 'utf-8')
+    vi.mocked(dialog.showOpenDialog).mockResolvedValueOnce({ canceled: false, filePaths: [filePath] })
+    const { ipc, handlers } = makeIpc()
+    const db = makeDb()
+    registerHandlers(ipc, db, makeWindows({ mainWindow: { hide: vi.fn() } }))
+    return { handlers, db }
+  }
+
+  it('export:all writes the stats collection alongside texts, categories and settings', async () => {
+    const filePath = join(dir, 'export.json')
+    vi.mocked(dialog.showSaveDialog).mockResolvedValueOnce({ canceled: false, filePath })
+    const { ipc, handlers } = makeIpc()
+    const db = makeDb({ getStatsCollection: vi.fn(() => statsFixture) })
+    registerHandlers(ipc, db, makeWindows({ mainWindow: { hide: vi.fn() } }))
+
+    const result = await handlers.get('export:all')!(null)
+
+    expect(result).toEqual({ ok: true })
+    const written = JSON.parse(readFileSync(filePath, 'utf-8'))
+    expect(written.stats).toEqual(statsFixture)
+    expect(Object.keys(written)).toEqual(
+      expect.arrayContaining(['texts', 'categories', 'settings', 'stats'])
+    )
+  })
+
+  it('import:json replaces the whole collection when the payload carries stats', async () => {
+    const { handlers, db } = importing({ texts: [], categories: [], stats: statsFixture })
+
+    const result = await handlers.get('import:json')!(null)
+
+    expect(result).toEqual({ ok: true, imported: 0 })
+    expect(db.replaceStats).toHaveBeenCalledWith(statsFixture)
+  })
+
+  it('import:json leaves existing stats alone when the payload has none', async () => {
+    const { handlers, db } = importing({ texts: [], categories: [] })
+
+    await handlers.get('import:json')!(null)
+
+    expect(db.replaceStats).not.toHaveBeenCalled()
+  })
+})
+
 describe('db:* handlers', () => {
   let handlers: HandlerMap
   let db: Database
@@ -508,6 +884,37 @@ describe('db:* handlers', () => {
     expect(db.saveReadingPosition).toHaveBeenCalledWith(2, 7, 'segment')
   })
 
+  it('db:recordSessionStats passes the session record through untouched', () => {
+    const record = {
+      textId: 3,
+      title: 'Chapter One',
+      startedAt: 1_700_000_000_000,
+      endedAt: 1_700_000_600_000,
+      activeMs: 540_000,
+      wordsRead: 1200,
+      pauses: 2,
+      rewinds: 1
+    }
+    handlers.get('db:recordSessionStats')!(null, record)
+    expect(db.recordSessionStats).toHaveBeenCalledWith(record)
+  })
+
+  it('db:getStatsOverview delegates to db.getStatsOverview()', () => {
+    const result = handlers.get('db:getStatsOverview')!(null)
+    expect(db.getStatsOverview).toHaveBeenCalledOnce()
+    expect(result).toEqual({ overview: 'stats' })
+  })
+
+  it('db:getStatsDays delegates to db.getStatsDays()', () => {
+    handlers.get('db:getStatsDays')!(null)
+    expect(db.getStatsDays).toHaveBeenCalledOnce()
+  })
+
+  it('db:getTodaySessionStats delegates to db.getTodaySessionStats()', () => {
+    handlers.get('db:getTodaySessionStats')!(null)
+    expect(db.getTodaySessionStats).toHaveBeenCalledOnce()
+  })
+
   it('db:deleteSummary passes id', () => {
     handlers.get('db:deleteSummary')!(null, 11)
     expect(db.deleteSummary).toHaveBeenCalledWith(11)
@@ -577,6 +984,25 @@ describe('rww:* handlers', () => {
     expect(result).toEqual({ ok: true })
   })
 
+  // The resolved `finishTemporarySession` mismatch (issue 03): preload used to
+  // forward a `reason` the handler never declared. The channel now carries no
+  // argument, and finishing stays reason-independent — main ends the session the
+  // same way however it was prompted.
+  it('rww:finishTemporarySession takes no argument and forwards none', () => {
+    const { ipc, handlers } = makeIpc()
+    const windows = makeWindows()
+    registerHandlers(ipc, makeDb(), windows)
+
+    expect(readWhileWorkingChannelContract.finishTemporarySession.arity).toBe(0)
+
+    const handler = handlers.get('rww:finishTemporarySession')!
+    // A stray extra argument cannot change what finishing does.
+    const result = handler(null, 'cancelled')
+
+    expect(windows.finishTemporaryReaderSession).toHaveBeenCalledWith()
+    expect(result).toEqual({ ok: true })
+  })
+
   it('rww:exit calls the shared exit-mode helper and returns { ok: true }', () => {
     const { ipc, handlers } = makeIpc()
     const windows = makeWindows()
@@ -599,7 +1025,6 @@ describe('rww:* handlers', () => {
         words_per_stack: 3,
         rww_words_per_stack: 5,
         stacks_visible: 2,
-        lines_enabled: false,
         lines_count: 1
       }))
     })
@@ -619,7 +1044,7 @@ describe('rww:* handlers', () => {
     const { ipc, handlers } = makeIpc()
     const windows = makeWindows({ temporaryReaderSession: null })
     const db = makeDb({
-      getSettings: vi.fn(() => ({ bpm: 300, words_per_stack: 3, stacks_visible: 2, lines_enabled: true, lines_count: 2 }))
+      getSettings: vi.fn(() => ({ bpm: 300, words_per_stack: 3, stacks_visible: 2, lines_count: 2 }))
     })
     registerHandlers(ipc, db, windows)
 

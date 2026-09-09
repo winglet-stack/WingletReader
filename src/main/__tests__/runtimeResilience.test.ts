@@ -33,7 +33,9 @@ describe('registerMainProcessCrashLogging', () => {
       const rejection = new Error('async boom')
       listeners.get('unhandledRejection')![0](rejection, Promise.resolve())
       expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('async boom'))
-      expect(terminate).toHaveBeenCalledTimes(2)
+      // unhandledRejection logs but is non-fatal: terminate was only called once
+      // (by the uncaughtException handler above), not again here.
+      expect(terminate).toHaveBeenCalledTimes(1)
     } finally {
       process.exitCode = previousExitCode
     }

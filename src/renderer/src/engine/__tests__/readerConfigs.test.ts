@@ -23,8 +23,7 @@ const BASE_SETTINGS: Settings = {
   stack_horizontal_offset: 0,
   theme: 'dark',
   highlight_active: true,
-  lines_enabled: false,
-  lines_count: 3,
+  lines_count: 1,
   lines_row_gap: 8,
   segmentation_enabled: true,
   segmentation_threshold: 5000,
@@ -67,8 +66,8 @@ function makeConfig(overrides: Partial<ReaderConfig> = {}): ReaderConfig {
     bpm: 60,
     words_per_stack: 3,
     stacks_visible: 1,
-    lines_enabled: false,
-    lines_count: 3,
+    lines_count: 1,
+    lines_anchor: 'center',
     lines_row_gap: 8,
     metronome_enabled: false,
     pause_at_sentences: true,
@@ -120,12 +119,14 @@ describe('readerConfigFromSettings', () => {
       font_family: 'Georgia, serif',
       bpm: 120,
       viewport_bg_color: '#000000',
+      lines_anchor: 'top',
     }
     const fields = readerConfigFromSettings(settings)
     expect(fields.font_size).toBe(54)
     expect(fields.font_family).toBe('Georgia, serif')
     expect(fields.bpm).toBe(120)
     expect(fields.viewport_bg_color).toBe('#000000')
+    expect(fields.lines_anchor).toBe('top')
   })
 
   it('does not include id, name, theme, or other non-reader fields', () => {
@@ -148,10 +149,11 @@ describe('applyReaderConfig', () => {
   })
 
   it('preserves field values exactly', () => {
-    const config = makeConfig({ font_size: 54, viewport_bg_color: '#ff0000' })
+    const config = makeConfig({ font_size: 54, viewport_bg_color: '#ff0000', lines_anchor: 'top' })
     const applied = applyReaderConfig(config)
     expect(applied.font_size).toBe(54)
     expect(applied.viewport_bg_color).toBe('#ff0000')
+    expect(applied.lines_anchor).toBe('top')
   })
 })
 
@@ -221,6 +223,19 @@ describe('validateReaderConfig', () => {
   it('returns the config when all fields are valid', () => {
     const config = makeConfig()
     expect(validateReaderConfig(config)).toEqual(config)
+  })
+
+  it('loads a pre-slice Profile with a centered anchor', () => {
+    const { lines_anchor: _linesAnchor, ...legacy } = makeConfig()
+
+    expect(validateReaderConfig(legacy)?.lines_anchor).toBe('center')
+  })
+
+  it('round-trips a top anchor and rejects unknown anchor values', () => {
+    const config = makeConfig({ lines_anchor: 'top' })
+
+    expect(validateReaderConfig(config)).toEqual(config)
+    expect(validateReaderConfig({ ...config, lines_anchor: 'bottom' })).toBeNull()
   })
 })
 

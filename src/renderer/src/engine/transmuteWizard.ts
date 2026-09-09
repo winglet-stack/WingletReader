@@ -133,9 +133,9 @@ export function highlightLabel(
 }
 
 export function layoutLabel(
-  config: Pick<TransmuteConfig, 'linesEnabled' | 'linesCount' | 'stacksVisible'>
+  config: Pick<TransmuteConfig, 'linesCount' | 'stacksVisible'>
 ): string {
-  if (config.linesEnabled && config.linesCount > 1) {
+  if (config.linesCount > 1) {
     return `${config.linesCount} rows x ${config.stacksVisible} columns`
   }
   return `${config.stacksVisible} stack${config.stacksVisible !== 1 ? 's' : ''}`

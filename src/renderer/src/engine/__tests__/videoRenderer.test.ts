@@ -1,8 +1,9 @@
 import { describe, it, expect, vi } from 'vitest'
 import {
   applyContentLimit,
-  buildReaderLikeFrame,
   buildStacksForTransmute,
+  buildVideoFrame,
+  buildVideoPreviewFrame,
   drawFrame,
   estimateDuration,
   estimateFileSize,
@@ -10,9 +11,9 @@ import {
   formatFileSize,
   frameBatchSize,
   resolutionDimensions,
-  resolveVideoReaderLayout
+  type VideoReaderFrame
 } from '../videoRenderer'
-import type { TransmuteConfig } from '../../types'
+import type { TransmuteConfig, WordStack } from '../../types'
 
 // ── Fixtures ───────────────────────────────────────────────────────────────
 
@@ -38,8 +39,7 @@ function makeConfig(overrides: Partial<TransmuteConfig> = {}): TransmuteConfig {
     highlightMode: 'default',
     highlightPanningChunkSize: 0,
     highlightingMode: 'default',
-    linesEnabled: false,
-    linesCount: 3,
+    linesCount: 1,
     linesRowGap: 8,
     stacksVisible: 1,
     stackGap: 32,
@@ -153,6 +153,53 @@ function makeMockCtx() {
   return ctx
 }
 
+// ── Frame helpers ──────────────────────────────────────────────────────────
+//
+// The exporter is a painter over the reader frame, so a drawing test states the
+// stacks and (where it matters) the beat, and lets the frame decide the rest.
+// Without an explicit beat the still preview frame is used: one complete block,
+// every slot filled — the state these tests used to describe by handing over a
+// fully-populated display array.
+
+interface SampleStack { words: string[]; isHeadline: boolean }
+
+function toStacks(samples: SampleStack[]): WordStack[] {
+  return samples.map((sample) => ({
+    words: sample.words,
+    type: sample.isHeadline ? 'headline' : 'normal',
+  }))
+}
+
+interface PaintOptions {
+  width?: number
+  height?: number
+  /** Beat to paint. Omitted → the still full-block preview frame. */
+  currentIndex?: number
+  progress?: number
+}
+
+function frameFor(
+  ctx: ReturnType<typeof makeMockCtx>,
+  samples: SampleStack[],
+  config: TransmuteConfig,
+  options: PaintOptions = {}
+): VideoReaderFrame {
+  const { width = 1280, height = 720, currentIndex } = options
+  const stacks = toStacks(samples)
+  return currentIndex === undefined
+    ? buildVideoPreviewFrame({ ctx: ctx as any, stacks, config, width, height })
+    : buildVideoFrame({ ctx: ctx as any, stacks, currentIndex, config, width, height })
+}
+
+function paint(
+  ctx: ReturnType<typeof makeMockCtx>,
+  samples: SampleStack[],
+  config: TransmuteConfig,
+  options: PaintOptions = {}
+): void {
+  drawFrame(ctx as any, frameFor(ctx, samples, config, options), config, options.progress)
+}
+
 function fontSizeFromCall(call: FillTextCall): number {
   return Number(call.font.match(/(\d+)px/)?.[1] ?? 16)
 }
@@ -260,6 +307,19 @@ describe('buildStacksForTransmute', () => {
     expect(stacks[0].words.length).toBe(12)
   })
 
+  it('caps Transmute-specific wordsPerStack values at 20', () => {
+    const text = Array.from({ length: 25 }, (_, i) => `word${i + 1}`).join(' ')
+    const stacks = buildStacksForTransmute(text, makeConfig({ wordsPerStack: 25 }))
+    expect(stacks.map((s) => s.words.length)).toEqual([13, 12])
+    stacks.forEach((s) => expect(s.words.length).toBeLessThanOrEqual(20))
+  })
+
+  it('keeps Transmute stacks sane at the N=20 ceiling', () => {
+    const text = Array.from({ length: 40 }, (_, i) => `word${i + 1}`).join(' ')
+    const stacks = buildStacksForTransmute(text, makeConfig({ wordsPerStack: 20 }))
+    expect(stacks.map((s) => s.words.length)).toEqual([20, 20])
+  })
+
   it('always treats headlines regardless of chunk rule settings', () => {
     const text = '# My Heading\nsome body text'
     const stacks = buildStacksForTransmute(text, makeConfig())
@@ -267,12 +327,15 @@ describe('buildStacksForTransmute', () => {
     expect(types).toContain('headline')
   })
 
-  it('uses chunk rule longWord from config', () => {
+  it('uses chunk rule longWord from config (soft preferred break, SP-3)', () => {
     const longWord = 'A'.repeat(16)
-    const text = `before ${longWord} after`
+    // 12 words at N=7, long word at index 5. Pure balance gives [6][6] (long word
+    // shares stack 1 with "before"); the soft break before it pulls the split to
+    // [5][7], so the long word starts a stack only when the rule is on.
+    const text = `alpha beta gamma delta before ${longWord} six seven eight nine ten eleven`
     const withRule = buildStacksForTransmute(text, makeConfig({ chunkRuleLongWord: true, wordsPerStack: 7 }))
     const withoutRule = buildStacksForTransmute(text, makeConfig({ chunkRuleLongWord: false, wordsPerStack: 7 }))
-    // With longWord rule, a break is forced before the long word so it starts a new stack
+    // With longWord rule, the soft break lands before the long word so it starts a new stack
     const longWordStartsStackWithRule = withRule.some((s) => s.words[0] === longWord)
     // Without rule, "before" and the long word share the same stack
     const sharedWithoutRule = withoutRule.some((s) => s.words.includes('before') && s.words.includes(longWord))
@@ -388,70 +451,130 @@ describe('formatFileSize', () => {
 // ── frameBatchSize ─────────────────────────────────────────────────────────
 
 describe('frameBatchSize', () => {
-  it('returns stacksVisible for single-row mode (linesEnabled=false)', () => {
-    // Reader: linesCount=1 when lines_enabled=false → blockSize = 1 × stacksVisible = 2
-    expect(frameBatchSize(makeConfig({ linesEnabled: false, linesCount: 3, stacksVisible: 2 }))).toBe(2)
+  it('returns stacksVisible for single-row mode (linesCount=1)', () => {
+    expect(frameBatchSize(makeConfig({ linesCount: 1, stacksVisible: 2 }))).toBe(2)
   })
 
   it('returns stacksVisible for single-row mode (linesCount=1)', () => {
-    // Reader: lines_enabled but lines_count=1 → still single row → blockSize = 1 × stacksVisible = 3
-    expect(frameBatchSize(makeConfig({ linesEnabled: true, linesCount: 1, stacksVisible: 3 }))).toBe(3)
+    expect(frameBatchSize(makeConfig({ linesCount: 1, stacksVisible: 3 }))).toBe(3)
   })
 
-  it('returns 1 when stacksVisible=1 and linesEnabled=false', () => {
-    expect(frameBatchSize(makeConfig({ linesEnabled: false, stacksVisible: 1 }))).toBe(1)
+  it('returns 1 when stacksVisible=1 and linesCount=1', () => {
+    expect(frameBatchSize(makeConfig({ linesCount: 1, stacksVisible: 1 }))).toBe(1)
   })
 
   it('returns linesCount × stacksVisible in multi-line mode', () => {
-    expect(frameBatchSize(makeConfig({ linesEnabled: true, linesCount: 3, stacksVisible: 2 }))).toBe(6)
+    expect(frameBatchSize(makeConfig({ linesCount: 3, stacksVisible: 2 }))).toBe(6)
   })
 
   it('clamps linesCount and stacksVisible to minimum of 1', () => {
-    expect(frameBatchSize(makeConfig({ linesEnabled: true, linesCount: 0, stacksVisible: 0 }))).toBe(1)
+    expect(frameBatchSize(makeConfig({ linesCount: 0, stacksVisible: 0 }))).toBe(1)
   })
 
   it('handles single column multi-line (linesCount=3, stacksVisible=1)', () => {
-    expect(frameBatchSize(makeConfig({ linesEnabled: true, linesCount: 3, stacksVisible: 1 }))).toBe(3)
+    expect(frameBatchSize(makeConfig({ linesCount: 3, stacksVisible: 1 }))).toBe(3)
   })
 })
 
-describe('buildReaderLikeFrame', () => {
-  it('pre-reveals the first panning chunk like the reader', () => {
-    const stacks = buildStacksForTransmute('one two three four', makeConfig({ wordsPerStack: 1 }))
-    const frame = buildReaderLikeFrame(
-      stacks,
-      0,
-      makeConfig({
-        wordsPerStack: 1,
-        stacksVisible: 4,
-        highlightMode: 'panning-bar',
-        highlightPanningChunkSize: 4
-      })
-    )
+// ── buildVideoFrame — the exporter consumes the reader frame ───────────────
+//
+// These replace the exporter's own block/reveal derivation (buildReaderLikeFrame).
+// The subject is unchanged: the exporter must show the same slots the reader would.
 
-    expect(frame.currentLineIdx).toBe(0)
-    expect(frame.currentSlotIdx).toBe(0)
-    expect(frame.displayStacks[0].words).toEqual(['one'])
-    expect(frame.displayStacks[1].words).toEqual(['two'])
-    expect(frame.displayStacks[2].words).toEqual([])
+describe('buildVideoFrame', () => {
+  it('pre-reveals the first panning chunk like the reader', () => {
+    const ctx = makeMockCtx()
+    const config = makeConfig({
+      wordsPerStack: 1,
+      stacksVisible: 4,
+      highlightMode: 'panning-bar',
+      highlightPanningChunkSize: 4
+    })
+    const stacks = buildStacksForTransmute('one two three four', config)
+    const { frame } = buildVideoFrame({ ctx: ctx as any, stacks, currentIndex: 0, config, width: 1280, height: 720 })
+
+    expect(frame.block.currentLineIdx).toBe(0)
+    expect(frame.block.currentSlotIdx).toBe(0)
+    const slots = frame.rows[0].slots
+    expect(slots[0].stack?.words).toEqual(['one'])
+    expect(slots[1].stack?.words).toEqual(['two'])
+    // Reserved-but-empty, where the old display array carried an empty-word sentinel.
+    expect(slots[2].stack).toBeNull()
   })
 
-  it('keeps the current stack visible when the solver reduces the effective line count', () => {
+  it('keeps the reveal sticky across a panning-mode gap beat', () => {
+    const ctx = makeMockCtx()
+    const config = makeConfig({
+      wordsPerStack: 1,
+      stacksVisible: 4,
+      highlightMode: 'panning-bar',
+      highlightPanningChunkSize: 4
+    })
+    const stacks = buildStacksForTransmute('one two three four', config)
+
+    const first = buildVideoFrame({ ctx: ctx as any, stacks, currentIndex: 0, config, width: 1280, height: 720 })
+    // Beat two would reveal only up to slot 1 on its own; the high-water mark holds it.
+    const second = buildVideoFrame({
+      ctx: ctx as any, stacks, currentIndex: 1, config, width: 1280, height: 720,
+      reveal: first.frame.reveal,
+    })
+
+    expect(first.frame.revealUpToSlot).toBe(1)
+    expect(second.frame.revealUpToSlot).toBe(1)
+    expect(second.frame.rows[0].slots[1].stack?.words).toEqual(['two'])
+  })
+
+  it('re-derives the block at the solver-reduced effective line count', () => {
+    const config = makeConfig({ wordsPerStack: 1, stacksVisible: 1, linesCount: 20 })
+    const ctx = makeMockCtx()
     const stacks = buildStacksForTransmute(
       'zero one two three four five six seven eight nine',
-      makeConfig({ wordsPerStack: 1 })
+      config
     )
-    const frame = buildReaderLikeFrame(
-      stacks,
-      4,
-      makeConfig({ wordsPerStack: 1, stacksVisible: 1, linesEnabled: true, linesCount: 5 }),
-      1
-    )
+    const { frame } = buildVideoFrame({ ctx: ctx as any, stacks, currentIndex: 4, config, width: 1280, height: 720 })
 
-    expect(frame.currentLineIdx).toBe(0)
-    expect(frame.currentSlotIdx).toBe(0)
-    expect(frame.displayStacks).toHaveLength(1)
-    expect(frame.displayStacks[0].words).toEqual(['four'])
+    expect(frame.geometry.linesCount).toBeLessThan(20)
+    expect(frame.rows).toHaveLength(frame.geometry.linesCount)
+    expect(frame.rows[frame.block.currentLineIdx].slots[0].stack?.words).toEqual(['four'])
+  })
+
+  it('keeps stacksVisible and wordsPerStack sacrosanct under solver degradation', () => {
+    const ctx = makeMockCtx()
+    const config = makeConfig({
+      wordsPerStack: 9,
+      stacksVisible: 6,
+      linesCount: 6,
+      fontSize: 180,
+      stackGap: 120,
+      linesRowGap: 80,
+      stackHorizontalOffset: 500,
+      stackVerticalOffset: -500,
+    })
+    const stacks = toStacks(
+      Array.from({ length: 36 }, (_, i) => ({ words: [`longword${i}`], isHeadline: false }))
+    )
+    const { frame } = buildVideoPreviewFrame({ ctx: ctx as any, stacks, config, width: 720, height: 720 })
+
+    expect(frame.stacksVisible).toBe(6)
+    expect(frame.wordsPerStack).toBe(9)
+    expect(frame.geometry.linesCount).toBeLessThanOrEqual(6)
+    expect(frame.geometry.stackGap).toBeLessThanOrEqual(config.stackGap)
+    expect(frame.geometry.rowGap).toBeLessThanOrEqual(config.linesRowGap)
+    expect(Math.abs(frame.geometry.horizontalOffset)).toBeLessThanOrEqual(500)
+    expect(Math.abs(frame.geometry.verticalOffset)).toBeLessThanOrEqual(500)
+  })
+
+  it('reserves the progress overlay strip out of the stage box', () => {
+    const ctx = makeMockCtx()
+    const stacks = toStacks([{ words: ['hello'], isHeadline: false }])
+    const plain = buildVideoFrame({ ctx: ctx as any, stacks, currentIndex: 0, config: makeConfig(), width: 1280, height: 720 })
+    const overlaid = buildVideoFrame({
+      ctx: ctx as any, stacks, currentIndex: 0,
+      config: makeConfig({ showProgressOverlay: true }), width: 1280, height: 720,
+    })
+
+    expect(overlaid.stage.x).toBeGreaterThan(plain.stage.x)
+    expect(overlaid.stage.width).toBeLessThan(plain.stage.width)
   })
 })
 
@@ -464,7 +587,7 @@ describe('buildReaderLikeFrame', () => {
 describe('drawFrame — background', () => {
   it('fills the entire canvas with bgColor', () => {
     const ctx = makeMockCtx()
-    drawFrame(ctx as any, [], makeConfig({ bgColor: '#123456' }), 1280, 720)
+    paint(ctx, [], makeConfig({ bgColor: '#123456' }))
     const bgFill = ctx._fillRects[0]
     expect(bgFill.fillStyle).toBe('#123456')
     expect(bgFill.x).toBe(0)
@@ -473,9 +596,9 @@ describe('drawFrame — background', () => {
     expect(bgFill.h).toBe(720)
   })
 
-  it('draws nothing beyond background when displayStacks is empty', () => {
+  it('draws nothing beyond background when the frame holds no stacks', () => {
     const ctx = makeMockCtx()
-    drawFrame(ctx as any, [], makeConfig(), 1280, 720)
+    paint(ctx, [], makeConfig())
     // Only the background fillRect
     expect(ctx._fillRects).toHaveLength(1)
     expect(ctx._fillTexts).toHaveLength(0)
@@ -483,7 +606,7 @@ describe('drawFrame — background', () => {
 
   it('uses bgColorOverride instead of bgColor when set', () => {
     const ctx = makeMockCtx()
-    drawFrame(ctx as any, [], makeConfig({ bgColor: '#111111', bgColorOverride: '#aabbcc' }), 1280, 720)
+    paint(ctx, [], makeConfig({ bgColor: '#111111', bgColorOverride: '#aabbcc' }))
     const bgFill = ctx._fillRects[0]
     expect(bgFill.fillStyle).toBe('#aabbcc')
     expect(bgFill.w).toBe(1280)
@@ -492,34 +615,34 @@ describe('drawFrame — background', () => {
 
   it('uses bgColor when bgColorOverride is empty string', () => {
     const ctx = makeMockCtx()
-    drawFrame(ctx as any, [], makeConfig({ bgColor: '#deadbe', bgColorOverride: '' }), 1280, 720)
+    paint(ctx, [], makeConfig({ bgColor: '#deadbe', bgColorOverride: '' }))
     const bgFill = ctx._fillRects[0]
     expect(bgFill.fillStyle).toBe('#deadbe')
   })
 
   it('skips the background fill entirely when transparentBackground is true', () => {
     const ctx = makeMockCtx()
-    drawFrame(ctx as any, [], makeConfig({ transparentBackground: true }), 1280, 720)
+    paint(ctx, [], makeConfig({ transparentBackground: true }))
     // No fillRect at all — not even a background
     expect(ctx._fillRects).toHaveLength(0)
   })
 
   it('calls clearRect over the full canvas when transparentBackground is true', () => {
     const ctx = makeMockCtx()
-    drawFrame(ctx as any, [], makeConfig({ transparentBackground: true }), 1280, 720)
+    paint(ctx, [], makeConfig({ transparentBackground: true }))
     expect(ctx._clearRects).toHaveLength(1)
     expect(ctx._clearRects[0]).toEqual({ x: 0, y: 0, w: 1280, h: 720 })
   })
 
   it('does not call clearRect when transparentBackground is false', () => {
     const ctx = makeMockCtx()
-    drawFrame(ctx as any, [], makeConfig({ transparentBackground: false }), 1280, 720)
+    paint(ctx, [], makeConfig({ transparentBackground: false }))
     expect(ctx._clearRects).toHaveLength(0)
   })
 
   it('ignores bgColorOverride when transparentBackground is true', () => {
     const ctx = makeMockCtx()
-    drawFrame(ctx as any, [], makeConfig({ bgColorOverride: '#ff0000', transparentBackground: true }), 1280, 720)
+    paint(ctx, [], makeConfig({ bgColorOverride: '#ff0000', transparentBackground: true }))
     // Should be no fill rects since transparent background skips the fill
     const bgColorFill = ctx._fillRects.find((r) => r.fillStyle === '#ff0000' && r.w === 1280)
     expect(bgColorFill).toBeUndefined()
@@ -528,8 +651,7 @@ describe('drawFrame — background', () => {
 
   it('renders text over transparent background', () => {
     const ctx = makeMockCtx()
-    const stack = { words: ['hello'], isHeadline: false }
-    drawFrame(ctx as any, [stack], makeConfig({ transparentBackground: true }), 1280, 720)
+    paint(ctx, [{ words: ['hello'], isHeadline: false }], makeConfig({ transparentBackground: true }))
     // No background fill
     const bgRects = ctx._fillRects.filter((r) => r.w === 1280 && r.h === 720)
     expect(bgRects).toHaveLength(0)
@@ -540,8 +662,12 @@ describe('drawFrame — background', () => {
 
   it('renders progress bar over transparent background', () => {
     const ctx = makeMockCtx()
-    const stack = { words: ['hi'], isHeadline: false }
-    drawFrame(ctx as any, [stack], makeConfig({ showProgressOverlay: true, transparentBackground: true }), 1280, 720, 0.5)
+    paint(
+      ctx,
+      [{ words: ['hi'], isHeadline: false }],
+      makeConfig({ showProgressOverlay: true, transparentBackground: true }),
+      { progress: 0.5 }
+    )
     // No full-canvas background fill
     const bgRects = ctx._fillRects.filter((r) => r.w === 1280 && r.h === 720)
     expect(bgRects).toHaveLength(0)
@@ -556,8 +682,7 @@ describe('drawFrame — background', () => {
 describe('drawFrame — single-stack mode (stacksVisible=1)', () => {
   it('renders text in textColor when highlight is off', () => {
     const ctx = makeMockCtx()
-    const stack = { words: ['hello'], isHeadline: false }
-    drawFrame(ctx as any, [stack], makeConfig({ textColor: '#aabbcc', highlightActive: false }), 1280, 720)
+    paint(ctx, [{ words: ['hello'], isHeadline: false }], makeConfig({ textColor: '#aabbcc', highlightActive: false }))
     const textCall = ctx._fillTexts.find((t) => t.text === 'hello')
     expect(textCall).toBeDefined()
     expect(textCall!.fillStyle).toBe('#aabbcc')
@@ -565,13 +690,10 @@ describe('drawFrame — single-stack mode (stacksVisible=1)', () => {
 
   it('draws a filled highlight box (fillRect) — not strokeRect — when highlightActive', () => {
     const ctx = makeMockCtx()
-    const stack = { words: ['word'], isHeadline: false }
-    drawFrame(
-      ctx as any,
-      [stack],
-      makeConfig({ highlightActive: true, highlightColor: '#ff0000', highlightTextColor: '#ffffff' }),
-      1280,
-      720
+    paint(
+      ctx,
+      [{ words: ['word'], isHeadline: false }],
+      makeConfig({ highlightActive: true, highlightColor: '#ff0000', highlightTextColor: '#ffffff' })
     )
     // Must have a fillRect in the highlight color
     const highlightFill = ctx._fillRects.find((r) => r.fillStyle === '#ff0000')
@@ -582,38 +704,31 @@ describe('drawFrame — single-stack mode (stacksVisible=1)', () => {
 
   it('renders text in highlightTextColor on top of the highlight box', () => {
     const ctx = makeMockCtx()
-    const stack = { words: ['word'], isHeadline: false }
-    drawFrame(
-      ctx as any,
-      [stack],
-      makeConfig({ highlightActive: true, highlightColor: '#ff0000', highlightTextColor: '#00ff00' }),
-      1280,
-      720
+    paint(
+      ctx,
+      [{ words: ['word'], isHeadline: false }],
+      makeConfig({ highlightActive: true, highlightColor: '#ff0000', highlightTextColor: '#00ff00' })
     )
     const textCall = ctx._fillTexts.find((t) => t.text === 'word')
     expect(textCall).toBeDefined()
     expect(textCall!.fillStyle).toBe('#00ff00')
   })
 
-  // A headline Stack is never treated as highlighted (matches the live reader),
-  // so no highlight fill is drawn behind it and its text uses the accent path.
-  // The decorative headline rules also use the accent colour, but are only
-  // HEADLINE_RULE_H (2px) tall — so a highlight box is identified by height > 2.
+  // A headline keeps its own treatment instead of the filled highlight box, in the
+  // exported video as before. The decorative headline rules also use the accent
+  // colour, but are only 2px tall — so a highlight box is identified by height > 2.
   it('draws no highlight box behind a headline stack in single-stack layout (Issue 06)', () => {
     const ctx = makeMockCtx()
-    const headline = { words: ['title'], isHeadline: true }
-    drawFrame(
-      ctx as any,
-      [headline],
+    paint(
+      ctx,
+      [{ words: ['title'], isHeadline: true }],
       makeConfig({
         stacksVisible: 1,
-        linesEnabled: false,
+        linesCount: 1,
         highlightActive: true,
         highlightColor: '#ff0000',
         highlightTextColor: '#00ff00',
-      }),
-      1280,
-      720
+      })
     )
     // No highlight fill (a box in the highlight colour taller than the 2px rules).
     const highlightBox = ctx._fillRects.find((r) => r.fillStyle === '#ff0000' && r.h > 2)
@@ -626,21 +741,16 @@ describe('drawFrame — single-stack mode (stacksVisible=1)', () => {
 
   it('draws no highlight box behind a headline cell in a grid layout (Issue 06b)', () => {
     const ctx = makeMockCtx()
-    const headline = { words: ['title'], isHeadline: true }
-    const normal = { words: ['body'], isHeadline: false }
-    drawFrame(
-      ctx as any,
-      [headline, normal],
+    paint(
+      ctx,
+      [{ words: ['title'], isHeadline: true }, { words: ['body'], isHeadline: false }],
       makeConfig({
         stacksVisible: 2,
         highlightActive: true,
         highlightColor: '#ff0000',
         highlightTextColor: '#00ff00',
       }),
-      1280,
-      720,
-      undefined,
-      { currentLineIdx: 0, currentSlotIdx: 0 } // highlighted slot holds the headline
+      { currentIndex: 0 } // highlighted slot holds the headline
     )
     // The highlighted cell holds the headline → no highlight fill behind it.
     const highlightBox = ctx._fillRects.find((r) => r.fillStyle === '#ff0000' && r.h > 2)
@@ -653,14 +763,7 @@ describe('drawFrame — single-stack mode (stacksVisible=1)', () => {
 
   it('keeps text inside the frame when vertical offset would push it above the top', () => {
     const ctx = makeMockCtx()
-    const stack = { words: ['hello'], isHeadline: false }
-    drawFrame(
-      ctx as any,
-      [stack],
-      makeConfig({ fontSize: 160, stackVerticalOffset: -500 }),
-      1280,
-      720
-    )
+    paint(ctx, [{ words: ['hello'], isHeadline: false }], makeConfig({ fontSize: 160, stackVerticalOffset: -500 }))
     const textCall = ctx._fillTexts.find((t) => t.text === 'hello')
     expect(textCall).toBeDefined()
     expect(textCall!.textBaseline).toBe('alphabetic')
@@ -673,28 +776,34 @@ describe('drawFrame — single-stack mode (stacksVisible=1)', () => {
     const ctx = makeMockCtx()
     const words = ['supercalifragilistic', 'expialidocious', 'counterrevolutionary', 'misinterpretations']
     const text = words.join(' ')
-    drawFrame(
-      ctx as any,
-      [{ words, isHeadline: false }],
-      makeConfig({ fontSize: 96 }),
-      720,
-      720
-    )
+    paint(ctx, [{ words, isHeadline: false }], makeConfig({ fontSize: 96 }), { width: 720, height: 720 })
     const textCall = ctx._fillTexts.find((t) => t.text === text)
     expect(textCall).toBeDefined()
     expect(textBoundsFromCall(textCall!).width).toBeLessThanOrEqual(568)
   })
 
+  it('honours the reader comfort font floor instead of the exporter\'s old 12px floor', () => {
+    const ctx = makeMockCtx()
+    // A grid this dense used to be shrunk by the exporter's own fitFontSize pass,
+    // which stopped at 12px (and 6px absolute). The size now comes from the solver.
+    const config = makeConfig({ stacksVisible: 3, linesCount: 3, fontSize: 40 })
+    const stacks = Array.from({ length: 9 }, (_, i) => ({ words: [`word${i}`], isHeadline: false }))
+    const { frame } = frameFor(ctx, stacks, config)
+    paint(ctx, stacks, config)
+
+    expect(frame.geometry.fontSize).toBeGreaterThanOrEqual(18)
+    for (const call of ctx._fillTexts) {
+      expect(fontSizeFromCall(call)).toBe(frame.geometry.fontSize)
+    }
+  })
+
   it('auto-resolves highlight text color to white/black when highlightTextColor is empty', () => {
     const ctx = makeMockCtx()
-    const stack = { words: ['word'], isHeadline: false }
     // Dark highlight → text should be white
-    drawFrame(
-      ctx as any,
-      [stack],
-      makeConfig({ highlightActive: true, highlightColor: '#000000', highlightTextColor: '' }),
-      1280,
-      720
+    paint(
+      ctx,
+      [{ words: ['word'], isHeadline: false }],
+      makeConfig({ highlightActive: true, highlightColor: '#000000', highlightTextColor: '' })
     )
     const textCall = ctx._fillTexts.find((t) => t.text === 'word')
     expect(textCall).toBeDefined()
@@ -703,13 +812,10 @@ describe('drawFrame — single-stack mode (stacksVisible=1)', () => {
 
   it('uses reader theme foreground as the highlight color fallback', () => {
     const ctx = makeMockCtx()
-    const stack = { words: ['word'], isHeadline: false }
-    drawFrame(
-      ctx as any,
-      [stack],
-      makeConfig({ highlightActive: true, highlightColor: '', theme: 'dark' }),
-      1280,
-      720
+    paint(
+      ctx,
+      [{ words: ['word'], isHeadline: false }],
+      makeConfig({ highlightActive: true, highlightColor: '', theme: 'dark' })
     )
     const highlightFill = ctx._fillRects.find((r) => r.fillStyle === '#f4f0e6')
     expect(highlightFill).toBeDefined()
@@ -719,16 +825,28 @@ describe('drawFrame — single-stack mode (stacksVisible=1)', () => {
 describe('drawFrame — headline rendering', () => {
   it('renders headline text in uppercase', () => {
     const ctx = makeMockCtx()
-    const stack = { words: ['chapter', 'one'], isHeadline: true }
-    drawFrame(ctx as any, [stack], makeConfig(), 1280, 720)
+    paint(ctx, [{ words: ['chapter', 'one'], isHeadline: true }], makeConfig())
     const textCall = ctx._fillTexts.find((t) => t.text === 'CHAPTER ONE')
     expect(textCall).toBeDefined()
   })
 
+  it('draws a headline at the frame\'s headline-scaled font size', () => {
+    const ctx = makeMockCtx()
+    const config = makeConfig()
+    const samples = [{ words: ['intro'], isHeadline: true }]
+    const { frame } = frameFor(ctx, samples, config)
+    paint(ctx, samples, config)
+
+    const textCall = ctx._fillTexts.find((t) => t.text === 'INTRO')
+    expect(textCall).toBeDefined()
+    // The 0.7 headline scale belongs to the frame; the painter must not scale again.
+    expect(fontSizeFromCall(textCall!)).toBe(frame.rows[0].slots[0].fontSize)
+    expect(frame.rows[0].slots[0].fontSize).toBeLessThan(frame.geometry.fontSize)
+  })
+
   it('draws two decorative rule rectangles for headline stacks', () => {
     const ctx = makeMockCtx()
-    const stack = { words: ['intro'], isHeadline: true }
-    drawFrame(ctx as any, [stack], makeConfig(), 1280, 720)
+    paint(ctx, [{ words: ['intro'], isHeadline: true }], makeConfig())
     // Background fill + two rule rects (both 40×2px, opacity reduced)
     const rulesAndBg = ctx._fillRects
     // Filter out the background rect (full-canvas size)
@@ -738,13 +856,10 @@ describe('drawFrame — headline rendering', () => {
 
   it('draws no highlight box for headline stacks when highlightActive=true (Issue 06)', () => {
     const ctx = makeMockCtx()
-    const stack = { words: ['chapter'], isHeadline: true }
-    drawFrame(
-      ctx as any,
-      [stack],
-      makeConfig({ highlightActive: true, highlightColor: '#ff0000' }),
-      1280,
-      720
+    paint(
+      ctx,
+      [{ words: ['chapter'], isHeadline: true }],
+      makeConfig({ highlightActive: true, highlightColor: '#ff0000' })
     )
     // A headline is never highlighted, matching the live reader: no fill box is
     // drawn behind it. The headline rules are also in highlightColor but only
@@ -756,37 +871,7 @@ describe('drawFrame — headline rendering', () => {
   })
 })
 
-describe('drawFrame — grid mode (stacksVisible > 1 or linesEnabled)', () => {
-  it('uses the solver without changing stacksVisible or wordsPerStack', () => {
-    const ctx = makeMockCtx()
-    const config = makeConfig({
-      wordsPerStack: 9,
-      stacksVisible: 6,
-      linesEnabled: true,
-      linesCount: 6,
-      fontSize: 180,
-      stackGap: 120,
-      linesRowGap: 80,
-      stackHorizontalOffset: 500,
-      stackVerticalOffset: -500,
-    })
-    const stacks = Array.from({ length: 36 }, (_, i) => ({
-      words: [`longword${i}`],
-      isHeadline: false,
-    }))
-
-    const layout = resolveVideoReaderLayout(ctx as any, stacks, config, 720, 720)
-
-    expect(layout.cols).toBe(6)
-    expect(layout.layout.stacksVisible).toBe(6)
-    expect(layout.layout.wordsPerStack).toBe(9)
-    expect(layout.layout.effectiveLinesCount).toBeLessThanOrEqual(6)
-    expect(layout.layout.effectiveStackGap).toBeLessThanOrEqual(config.stackGap)
-    expect(layout.layout.effectiveRowGap).toBeLessThanOrEqual(config.linesRowGap)
-    expect(Math.abs(layout.layout.clampedHorizontalOffset)).toBeLessThanOrEqual(500)
-    expect(Math.abs(layout.layout.clampedVerticalOffset)).toBeLessThanOrEqual(500)
-  })
-
+describe('drawFrame — grid mode (stacksVisible > 1 or linesCount > 1)', () => {
   it('renders all stacks in a single-row multi-column layout', () => {
     const ctx = makeMockCtx()
     const stacks = [
@@ -794,33 +879,29 @@ describe('drawFrame — grid mode (stacksVisible > 1 or linesEnabled)', () => {
       { words: ['two'], isHeadline: false },
       { words: ['three'], isHeadline: false },
     ]
-    drawFrame(ctx as any, stacks, makeConfig({ stacksVisible: 3, linesEnabled: false }), 1280, 720)
+    paint(ctx, stacks, makeConfig({ stacksVisible: 3, linesCount: 1 }))
     expect(ctx._fillTexts.map((t) => t.text)).toEqual(expect.arrayContaining(['one', 'two', 'three']))
   })
 
   it('renders all stacks in a multi-row grid layout', () => {
     const ctx = makeMockCtx()
     const stacks = Array.from({ length: 6 }, (_, i) => ({ words: [`w${i}`], isHeadline: false }))
-    drawFrame(
-      ctx as any,
-      stacks,
-      makeConfig({ stacksVisible: 3, linesEnabled: true, linesCount: 2 }),
-      1280,
-      720
-    )
+    paint(ctx, stacks, makeConfig({ stacksVisible: 3, linesCount: 2 }))
     expect(ctx._fillTexts).toHaveLength(6)
+  })
+
+  it('paints nothing in reserved-but-empty slots', () => {
+    const ctx = makeMockCtx()
+    const stacks = Array.from({ length: 6 }, (_, i) => ({ words: [`w${i}`], isHeadline: false }))
+    // Beat 1 of a 3×2 block: the line box holds six slots, two are filled.
+    paint(ctx, stacks, makeConfig({ stacksVisible: 3, linesCount: 2 }), { currentIndex: 1 })
+    expect(ctx._fillTexts.map((t) => t.text)).toEqual(['w0', 'w1'])
   })
 
   it('shrinks dense multi-line text so the top and bottom rows are not clipped', () => {
     const ctx = makeMockCtx()
     const stacks = Array.from({ length: 10 }, (_, i) => ({ words: [`w${i}`], isHeadline: false }))
-    drawFrame(
-      ctx as any,
-      stacks,
-      makeConfig({ fontSize: 180, stacksVisible: 1, linesEnabled: true, linesCount: 10 }),
-      1280,
-      720
-    )
+    paint(ctx, stacks, makeConfig({ fontSize: 180, stacksVisible: 1, linesCount: 10 }))
 
     expect(ctx._fillTexts).toHaveLength(10)
     for (const call of ctx._fillTexts) {
@@ -835,7 +916,6 @@ describe('drawFrame — grid mode (stacksVisible > 1 or linesEnabled)', () => {
     const config = makeConfig({
       wordsPerStack: 8,
       stacksVisible: 6,
-      linesEnabled: true,
       linesCount: 6,
       fontSize: 180,
       stackGap: 120,
@@ -847,12 +927,12 @@ describe('drawFrame — grid mode (stacksVisible > 1 or linesEnabled)', () => {
       words: [`dense${i}`, 'configuration', 'keeps', 'words'],
       isHeadline: false,
     }))
-    const layout = resolveVideoReaderLayout(ctx as any, stacks, config, 720, 720)
+    const { frame } = frameFor(ctx, stacks, config, { width: 720, height: 720 })
 
-    drawFrame(ctx as any, stacks, config, 720, 720)
+    paint(ctx, stacks, config, { width: 720, height: 720 })
 
-    expect(layout.cols).toBe(config.stacksVisible)
-    expect(ctx._fillTexts).toHaveLength(layout.rows * config.stacksVisible)
+    expect(frame.stacksVisible).toBe(config.stacksVisible)
+    expect(ctx._fillTexts).toHaveLength(frame.geometry.linesCount * config.stacksVisible)
     for (const call of ctx._fillTexts) {
       const bounds = textBoundsFromCall(call)
       expect(bounds.left).toBeGreaterThanOrEqual(0)
@@ -868,7 +948,7 @@ describe('drawFrame — grid mode (stacksVisible > 1 or linesEnabled)', () => {
       { words: ['left'], isHeadline: false },
       { words: ['right'], isHeadline: false },
     ]
-    drawFrame(ctx as any, stacks, makeConfig({ stacksVisible: 2, linesEnabled: false }), 1280, 720)
+    paint(ctx, stacks, makeConfig({ stacksVisible: 2, linesCount: 1 }))
     const leftX = ctx._fillTexts.find((t) => t.text === 'left')!.x
     const rightX = ctx._fillTexts.find((t) => t.text === 'right')!.x
     expect(rightX).toBeGreaterThan(leftX)
@@ -878,9 +958,9 @@ describe('drawFrame — grid mode (stacksVisible > 1 or linesEnabled)', () => {
     const offset = 50
     const ctxNoOffset = makeMockCtx()
     const ctxWithOffset = makeMockCtx()
-    const stack = { words: ['test'], isHeadline: false }
-    drawFrame(ctxNoOffset as any, [stack], makeConfig({ stacksVisible: 2, linesEnabled: false, stackVerticalOffset: 0 }), 1280, 720)
-    drawFrame(ctxWithOffset as any, [stack], makeConfig({ stacksVisible: 2, linesEnabled: false, stackVerticalOffset: offset }), 1280, 720)
+    const stack = [{ words: ['test'], isHeadline: false }]
+    paint(ctxNoOffset, stack, makeConfig({ stacksVisible: 2, linesCount: 1, stackVerticalOffset: 0 }))
+    paint(ctxWithOffset, stack, makeConfig({ stacksVisible: 2, linesCount: 1, stackVerticalOffset: offset }))
     const yNoOffset = ctxNoOffset._fillTexts[0]?.y ?? 0
     const yWithOffset = ctxWithOffset._fillTexts[0]?.y ?? 0
     expect(yWithOffset - yNoOffset).toBeCloseTo(offset, 0)
@@ -894,7 +974,7 @@ describe('drawFrame — grid mode (stacksVisible > 1 or linesEnabled)', () => {
     ]
     // stroke() is called for dividers; track via a spy
     const strokeSpy = vi.spyOn(ctx, 'stroke')
-    drawFrame(ctx as any, stacks, makeConfig({ stacksVisible: 2, linesEnabled: false, showChunkDividers: true }), 1280, 720)
+    paint(ctx, stacks, makeConfig({ stacksVisible: 2, linesCount: 1, showChunkDividers: true }))
     expect(strokeSpy).toHaveBeenCalled()
   })
 
@@ -905,7 +985,7 @@ describe('drawFrame — grid mode (stacksVisible > 1 or linesEnabled)', () => {
       { words: ['b'], isHeadline: false },
     ]
     const strokeSpy = vi.spyOn(ctx, 'stroke')
-    drawFrame(ctx as any, stacks, makeConfig({ stacksVisible: 2, linesEnabled: false, showChunkDividers: false }), 1280, 720)
+    paint(ctx, stacks, makeConfig({ stacksVisible: 2, linesCount: 1, showChunkDividers: false }))
     expect(strokeSpy).not.toHaveBeenCalled()
   })
 
@@ -916,12 +996,10 @@ describe('drawFrame — grid mode (stacksVisible > 1 or linesEnabled)', () => {
       { words: ['two'], isHeadline: false },
       { words: ['three'], isHeadline: false },
     ]
-    drawFrame(
-      ctx as any,
+    paint(
+      ctx,
       stacks,
-      makeConfig({ stacksVisible: 3, linesEnabled: false, highlightActive: true, highlightColor: '#ff0000' }),
-      1280,
-      720
+      makeConfig({ stacksVisible: 3, linesCount: 1, highlightActive: true, highlightColor: '#ff0000' })
     )
     const highlightBoxes = ctx._fillRects.filter((r) => r.fillStyle === '#ff0000' && r.w > 20 && r.h > 10)
     expect(highlightBoxes).toHaveLength(1)
@@ -934,53 +1012,73 @@ describe('drawFrame — grid mode (stacksVisible > 1 or linesEnabled)', () => {
       { words: ['two'], isHeadline: false },
       { words: ['three'], isHeadline: false },
     ]
-    drawFrame(
-      ctx as any,
+    paint(
+      ctx,
       stacks,
       makeConfig({
         stacksVisible: 3,
-        linesEnabled: false,
+        linesCount: 1,
         highlightActive: true,
         highlightColor: '#ff0000',
         highlightMode: 'progressive-bar'
       }),
-      1280,
-      720,
-      undefined,
-      { currentLineIdx: 0, currentSlotIdx: 2 }
+      { currentIndex: 2 }
     )
     const highlightBoxes = ctx._fillRects.filter((r) => r.fillStyle === '#ff0000' && r.w > 20 && r.h > 10)
     expect(highlightBoxes.length).toBeGreaterThanOrEqual(3)
   })
 
-  it('never fills the separator gap with highlight colour in grid mode', () => {
-    // progressive-bar with currentSlotIdx=1 → both stacks are simultaneously active.
-    // Before the fix the code filled the colGap between them with hColor, producing an
-    // extra fillRect. After the fix only the two word-highlight boxes should appear.
+  it('connects adjacent highlighted slots through the divider gap', () => {
+    // progressive-bar at slot 1 → both stacks are simultaneously active. The reader
+    // joins them into one bar (.stack-divider--active + .stack-slot--connected-*);
+    // the exporter used to ignore the divider's active state and leave a gap.
     const ctx = makeMockCtx()
     const stacks = [
       { words: ['hello'], isHeadline: false },
       { words: ['world'], isHeadline: false },
     ]
-    drawFrame(
-      ctx as any,
+    const config = makeConfig({
+      stacksVisible: 2,
+      linesCount: 1,
+      highlightActive: true,
+      highlightColor: '#ff0000',
+      highlightMode: 'progressive-bar',
+      showChunkDividers: true,
+    })
+    paint(ctx, stacks, config, { currentIndex: 1 })
+
+    const highlightFills = ctx._fillRects
+      .filter((r) => r.fillStyle === '#ff0000')
+      .sort((a, b) => a.x - b.x)
+    // Two word boxes plus the connector between them — no gap, no overlap.
+    expect(highlightFills).toHaveLength(3)
+    const [left, connector, right] = highlightFills
+    expect(connector.x).toBe(left.x + left.w)
+    expect(connector.x + connector.w).toBe(right.x)
+  })
+
+  it('leaves an inactive divider as the hairline rule', () => {
+    const ctx = makeMockCtx()
+    const stacks = [
+      { words: ['hello'], isHeadline: false },
+      { words: ['world'], isHeadline: false },
+    ]
+    const strokeSpy = vi.spyOn(ctx, 'stroke')
+    // Default highlight mode → only slot 0 is active, so the divider stays inert.
+    paint(
+      ctx,
       stacks,
       makeConfig({
         stacksVisible: 2,
-        linesEnabled: false,
+        linesCount: 1,
         highlightActive: true,
         highlightColor: '#ff0000',
-        highlightMode: 'progressive-bar',
         showChunkDividers: true,
       }),
-      1280,
-      720,
-      undefined,
-      { currentLineIdx: 0, currentSlotIdx: 1 }
+      { currentIndex: 0 }
     )
-    // Only the two word-box highlight rects should carry the highlight colour.
-    const highlightFills = ctx._fillRects.filter((r) => r.fillStyle === '#ff0000')
-    expect(highlightFills).toHaveLength(2)
+    expect(strokeSpy).toHaveBeenCalled()
+    expect(ctx._fillRects.filter((r) => r.fillStyle === '#ff0000')).toHaveLength(1)
   })
 
   it('draws panning-bar first-scan highlights in grid mode', () => {
@@ -991,21 +1089,18 @@ describe('drawFrame — grid mode (stacksVisible > 1 or linesEnabled)', () => {
       { words: ['three'], isHeadline: false },
       { words: ['four'], isHeadline: false },
     ]
-    drawFrame(
-      ctx as any,
+    paint(
+      ctx,
       stacks,
       makeConfig({
         stacksVisible: 4,
-        linesEnabled: false,
+        linesCount: 1,
         highlightActive: true,
         highlightColor: '#ff0000',
         highlightMode: 'panning-bar',
         highlightPanningChunkSize: 4
       }),
-      1280,
-      720,
-      undefined,
-      { currentLineIdx: 0, currentSlotIdx: 0 }
+      { currentIndex: 0 }
     )
     const highlightBoxes = ctx._fillRects.filter((r) => r.fillStyle === '#ff0000' && r.w > 20 && r.h > 10)
     expect(highlightBoxes.length).toBeGreaterThanOrEqual(2)
@@ -1016,10 +1111,10 @@ describe('drawFrame — stackVerticalOffset (single-stack)', () => {
   it('shifts the text Y position by the offset', () => {
     const ctxZero = makeMockCtx()
     const ctxShifted = makeMockCtx()
-    const stack = { words: ['hello'], isHeadline: false }
+    const stack = [{ words: ['hello'], isHeadline: false }]
 
-    drawFrame(ctxZero as any, [stack], makeConfig({ stackVerticalOffset: 0 }), 1280, 720)
-    drawFrame(ctxShifted as any, [stack], makeConfig({ stackVerticalOffset: 80 }), 1280, 720)
+    paint(ctxZero, stack, makeConfig({ stackVerticalOffset: 0 }))
+    paint(ctxShifted, stack, makeConfig({ stackVerticalOffset: 80 }))
 
     const yZero = ctxZero._fillTexts[0]?.y ?? 0
     const yShifted = ctxShifted._fillTexts[0]?.y ?? 0
@@ -1041,15 +1136,13 @@ describe('TransmuteConfig Reader-derived fields', () => {
     expect(cfg.highlightColor).toBe('#ff0000')
   })
 
-  it('carries linesEnabled, linesCount, linesRowGap, stacksVisible, stackGap', () => {
+  it('carries linesCount, linesRowGap, stacksVisible, stackGap', () => {
     const cfg = makeConfig({
-      linesEnabled: true,
       linesCount: 4,
       linesRowGap: 12,
       stacksVisible: 2,
       stackGap: 24
     })
-    expect(cfg.linesEnabled).toBe(true)
     expect(cfg.linesCount).toBe(4)
     expect(cfg.linesRowGap).toBe(12)
     expect(cfg.stacksVisible).toBe(2)
@@ -1084,8 +1177,7 @@ describe('TransmuteConfig Reader-derived fields', () => {
 describe('drawFrame — segment isolation (fresh context per call)', () => {
   it('draws background and text on a fresh context for the first segment', () => {
     const ctx = makeMockCtx()
-    const stacks = [{ words: ['alpha'], isHeadline: false }]
-    drawFrame(ctx as any, stacks, makeConfig({ bgColor: '#111111', textColor: '#ffffff' }), 1280, 720)
+    paint(ctx, [{ words: ['alpha'], isHeadline: false }], makeConfig({ bgColor: '#111111', textColor: '#ffffff' }))
     const bgFill = ctx._fillRects[0]
     expect(bgFill.fillStyle).toBe('#111111')
     const textDraw = ctx._fillTexts.find((t) => t.text === 'alpha')
@@ -1096,11 +1188,11 @@ describe('drawFrame — segment isolation (fresh context per call)', () => {
   it('draws background and text correctly on a separate fresh context for the second segment', () => {
     // Simulate segment 1 drawing
     const ctx1 = makeMockCtx()
-    drawFrame(ctx1 as any, [{ words: ['seg1'], isHeadline: false }], makeConfig({ bgColor: '#111111' }), 1280, 720)
+    paint(ctx1, [{ words: ['seg1'], isHeadline: false }], makeConfig({ bgColor: '#111111' }))
 
     // Simulate segment 2 drawing on its OWN fresh context — must be fully independent
     const ctx2 = makeMockCtx()
-    drawFrame(ctx2 as any, [{ words: ['seg2'], isHeadline: false }], makeConfig({ bgColor: '#222222', textColor: '#eeeeee' }), 1280, 720)
+    paint(ctx2, [{ words: ['seg2'], isHeadline: false }], makeConfig({ bgColor: '#222222', textColor: '#eeeeee' }))
 
     // Segment 2's context must have its own background
     const bg2 = ctx2._fillRects[0]
@@ -1116,7 +1208,7 @@ describe('drawFrame — segment isolation (fresh context per call)', () => {
     words.forEach((word) => {
       // Each iteration simulates a fresh canvas for that segment
       const ctx = makeMockCtx()
-      drawFrame(ctx as any, [{ words: [word], isHeadline: false }], makeConfig(), 1280, 720)
+      paint(ctx, [{ words: [word], isHeadline: false }], makeConfig())
       const drawn = ctx._fillTexts.find((t) => t.text === word)
       expect(drawn).toBeDefined()
     })
@@ -1127,7 +1219,7 @@ describe('drawFrame — segment isolation (fresh context per call)', () => {
     const ctx = makeMockCtx()
     for (let i = 0; i < 3; i++) {
       const before = ctx._fillRects.length
-      drawFrame(ctx as any, [{ words: [`word${i}`], isHeadline: false }], makeConfig({ bgColor: '#0a0a0a' }), 1280, 720)
+      paint(ctx, [{ words: [`word${i}`], isHeadline: false }], makeConfig({ bgColor: '#0a0a0a' }))
       // At least one fillRect was added per call (the background)
       const added = ctx._fillRects.slice(before)
       expect(added.some((r) => r.fillStyle === '#0a0a0a' && r.w === 1280 && r.h === 720)).toBe(true)
@@ -1137,11 +1229,11 @@ describe('drawFrame — segment isolation (fresh context per call)', () => {
   it('draws headline text on a second-segment context after a normal-text first segment', () => {
     // Segment 1: normal text
     const ctx1 = makeMockCtx()
-    drawFrame(ctx1 as any, [{ words: ['body'], isHeadline: false }], makeConfig(), 1280, 720)
+    paint(ctx1, [{ words: ['body'], isHeadline: false }], makeConfig())
 
     // Segment 2: headline — must render correctly on its own fresh context
     const ctx2 = makeMockCtx()
-    drawFrame(ctx2 as any, [{ words: ['chapter', 'one'], isHeadline: true }], makeConfig(), 1280, 720)
+    paint(ctx2, [{ words: ['chapter', 'one'], isHeadline: true }], makeConfig())
     const textDraw = ctx2._fillTexts.find((t) => t.text === 'CHAPTER ONE')
     expect(textDraw).toBeDefined()
     // Decorative rules (40×2px) must appear
@@ -1153,24 +1245,23 @@ describe('drawFrame — segment isolation (fresh context per call)', () => {
 // ── drawFrame — progress overlay ───────────────────────────────────────────
 
 describe('drawFrame — progress overlay', () => {
+  const HELLO = [{ words: ['hello'], isHeadline: false }]
+
   it('does not draw overlay elements when showProgressOverlay is false', () => {
     const ctx = makeMockCtx()
-    drawFrame(ctx as any, [{ words: ['hello'], isHeadline: false }],
-      makeConfig({ showProgressOverlay: false }), 1280, 720, 0.5)
+    paint(ctx, HELLO, makeConfig({ showProgressOverlay: false }), { progress: 0.5 })
     expect(ctx._fillTexts.some((t) => t.text.includes('%'))).toBe(false)
   })
 
   it('draws a percentage chip when showProgressOverlay is true', () => {
     const ctx = makeMockCtx()
-    drawFrame(ctx as any, [{ words: ['hello'], isHeadline: false }],
-      makeConfig({ showProgressOverlay: true }), 1280, 720, 0.47)
+    paint(ctx, HELLO, makeConfig({ showProgressOverlay: true }), { progress: 0.47 })
     expect(ctx._fillTexts.some((t) => t.text === '47%')).toBe(true)
   })
 
   it('draws two bar rects (track + fill) when showProgressOverlay is true', () => {
     const ctx = makeMockCtx()
-    drawFrame(ctx as any, [{ words: ['hello'], isHeadline: false }],
-      makeConfig({ showProgressOverlay: true }), 1280, 720, 0.5)
+    paint(ctx, HELLO, makeConfig({ showProgressOverlay: true }), { progress: 0.5 })
     // Track and fill are both drawn at OVERLAY_BAR_W = 5px wide
     const barRects = ctx._fillRects.filter((r) => r.w === 5)
     expect(barRects).toHaveLength(2)
@@ -1178,17 +1269,16 @@ describe('drawFrame — progress overlay', () => {
 
   it('does not draw overlay when progressFraction is undefined even if showProgressOverlay is true', () => {
     const ctx = makeMockCtx()
-    drawFrame(ctx as any, [{ words: ['hello'], isHeadline: false }],
-      makeConfig({ showProgressOverlay: true }), 1280, 720)
+    paint(ctx, HELLO, makeConfig({ showProgressOverlay: true }))
     expect(ctx._fillTexts.some((t) => t.text.includes('%'))).toBe(false)
   })
 
   it('shifts text cx right when overlay is on vs off', () => {
     const ctxOn = makeMockCtx()
     const ctxOff = makeMockCtx()
-    const stack = { words: ['test'], isHeadline: false }
-    drawFrame(ctxOn as any, [stack], makeConfig({ showProgressOverlay: true }), 1280, 720, 0.5)
-    drawFrame(ctxOff as any, [stack], makeConfig({ showProgressOverlay: false }), 1280, 720)
+    const stack = [{ words: ['test'], isHeadline: false }]
+    paint(ctxOn, stack, makeConfig({ showProgressOverlay: true }), { progress: 0.5 })
+    paint(ctxOff, stack, makeConfig({ showProgressOverlay: false }))
     const xOn = ctxOn._fillTexts.find((t) => t.text === 'test')!.x
     const xOff = ctxOff._fillTexts.find((t) => t.text === 'test')!.x
     expect(xOn).toBeGreaterThan(xOff)
@@ -1196,8 +1286,7 @@ describe('drawFrame — progress overlay', () => {
 
   it('clamps percentage to 100 when progress exceeds 1', () => {
     const ctx = makeMockCtx()
-    drawFrame(ctx as any, [{ words: ['hello'], isHeadline: false }],
-      makeConfig({ showProgressOverlay: true }), 1280, 720, 1.5)
+    paint(ctx, HELLO, makeConfig({ showProgressOverlay: true }), { progress: 1.5 })
     expect(ctx._fillTexts.some((t) => t.text === '100%')).toBe(true)
   })
 })

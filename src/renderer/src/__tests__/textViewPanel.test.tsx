@@ -25,6 +25,8 @@ import { NavigationProvider } from '../contexts/NavigationContext'
 import { SettingsProvider } from '../contexts/SettingsContext'
 import { LibraryProvider } from '../contexts/LibraryContext'
 import { ReaderProvider } from '../contexts/ReaderContext'
+import { displayRenditionOf } from '../engine/wordIndex'
+import { useTextWordIndex } from '../hooks/useWordIndex'
 
 afterEach(cleanup)
 
@@ -71,7 +73,6 @@ const BASE_SETTINGS: Settings = {
   stack_horizontal_offset: 0,
   theme: 'dark',
   highlight_active: false,
-  lines_enabled: false,
   lines_count: 1,
   lines_row_gap: 0,
   segmentation_enabled: false,
@@ -297,8 +298,8 @@ function ControlledTextViewPanel({
   bookmarks = [],
 }: ControlledPanelProps) {
   const [textViewMode, setTextViewMode] = React.useState<'plain' | 'source'>('plain')
-  const displayContent = (text.content_display ?? text.content ?? '').replace(/\f/g, '\n\n')
-  const paging = useTextPaging(displayContent, plainTextCtx.wordOffset)
+  const displayContent = displayRenditionOf(text)
+  const paging = useTextPaging(useTextWordIndex(displayContent, true), plainTextCtx.wordOffset)
 
   return (
     <TextViewPanel
@@ -679,4 +680,3 @@ describe('TextViewPanel — PG-4 inline bookmark markers', () => {
     expect(onPick).not.toHaveBeenCalled()
   })
 })
-

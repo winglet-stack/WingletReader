@@ -46,8 +46,7 @@ const BASE_SETTINGS = {
   stack_horizontal_offset: 0,
   theme: 'dark',
   highlight_active: true,
-  lines_enabled: false,
-  lines_count: 3,
+  lines_count: 1,
   lines_row_gap: 8,
   segmentation_enabled: true,
   segmentation_threshold: 5000,
@@ -83,8 +82,7 @@ const BASE_SETTINGS = {
   rww_bpm: 90,
   rww_words_per_stack: 2,
   rww_stacks_visible: 1,
-  rww_lines_enabled: false,
-  rww_lines_count: 2,
+  rww_lines_count: 1,
   custom_rww_playback_presets: [],
   custom_palettes: [],
   custom_text_presets: [],
@@ -217,13 +215,15 @@ function ResumeFlowDisplay() {
 }
 
 function BookmarkOpenDisplay() {
-  const { activeSegmentCtx, openTextAtWordOffset, readerResumeFrom } = useReader()
+  const { activeSegmentCtx, openTextAtWordOffset, readerResumeFrom, readerResumeFromWordOffset } =
+    useReader()
   const { activeText } = useLibrary()
   const { view } = useNavigation()
   return (
     <div>
       <span data-testid="active-text">{activeText?.title ?? 'none'}</span>
       <span data-testid="resume-from">{readerResumeFrom ?? 'none'}</span>
+      <span data-testid="resume-offset">{readerResumeFromWordOffset ?? 'none'}</span>
       <span data-testid="segment-ctx">{activeSegmentCtx ? 'set' : 'unset'}</span>
       <span data-testid="view">{view}</span>
       <button data-testid="open-bookmark" onClick={() => openTextAtWordOffset(BOOK, 4)}>
@@ -287,7 +287,7 @@ describe('ReaderContext — openSegmentInReader', () => {
 })
 
 describe('ReaderContext - openTextAtWordOffset', () => {
-  it('opens the source text and resolves the bookmark word offset to a resume stack', async () => {
+  it('opens the source text and carries the bookmark word offset through', async () => {
     vi.mocked(window.api.db.getText).mockResolvedValue({
       ...BOOK,
       content: 'one two three four five six seven eight',
@@ -302,7 +302,10 @@ describe('ReaderContext - openTextAtWordOffset', () => {
 
     expect(window.api.db.getText).toHaveBeenCalledWith(BOOK.id)
     expect(screen.getByTestId('active-text').textContent).toBe(BOOK.title)
-    expect(screen.getByTestId('resume-from').textContent).toBe('2')
+    // The offset stays an offset here; the Reader resolves it against the
+    // tokenization it builds anyway (`architecture-depth/08`).
+    expect(screen.getByTestId('resume-offset').textContent).toBe('4')
+    expect(screen.getByTestId('resume-from').textContent).toBe('none')
     expect(screen.getByTestId('segment-ctx').textContent).toBe('unset')
     expect(screen.getByTestId('view').textContent).toBe('reader')
   })

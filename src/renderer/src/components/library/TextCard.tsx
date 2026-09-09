@@ -3,8 +3,17 @@ import type { CategoryRecord, TextRecord } from '../../types'
 import { resolveTextCategoryId } from '../../engine/libraryCategoryPicker'
 import { resolveTextSegmentVocabulary } from '../../engine/segmentVocabulary'
 import viewContentTileSrc from '../../assets/library-tiles/view-content.png'
+import viewContentHoverSrc from '../../assets/library-tiles/view-content-hover.png'
+import viewContentDarkSrc from '../../assets/library-tiles/view-content-dark.png'
+import viewContentDarkHoverSrc from '../../assets/library-tiles/view-content-dark-hover.png'
 import resumeButtonSrc from '../../assets/library-tiles/resume-button.png'
+import resumeButtonHoverSrc from '../../assets/library-tiles/resume-button-hover.png'
+import resumeButtonDarkSrc from '../../assets/library-tiles/resume-button-dark.png'
+import resumeButtonDarkHoverSrc from '../../assets/library-tiles/resume-button-dark-hover.png'
 import deleteButtonSrc from '../../assets/library-tiles/delete-button.png'
+import deleteButtonHoverSrc from '../../assets/library-tiles/delete-button-hover.png'
+import deleteButtonDarkSrc from '../../assets/library-tiles/delete-button-dark.png'
+import deleteButtonDarkHoverSrc from '../../assets/library-tiles/delete-button-dark-hover.png'
 
 export type TextCardReadTarget =
   | { kind: 'text'; stackIndex: number; resume: boolean }
@@ -132,7 +141,10 @@ export default function TextCard({
           aria-label={`${readLabel} "${t.title}"`}
           disabled={readBusy}
         >
-          <img className="text-card-read-icon" src={resumeButtonSrc} alt="" aria-hidden="true" />
+          <img className="text-card-read-icon text-card-read-icon--idle text-card-read-icon--light" src={resumeButtonSrc} alt="" aria-hidden="true" />
+          <img className="text-card-read-icon text-card-read-icon--hover text-card-read-icon--light" src={resumeButtonHoverSrc} alt="" aria-hidden="true" />
+          <img className="text-card-read-icon text-card-read-icon--idle text-card-read-icon--dark" src={resumeButtonDarkSrc} alt="" aria-hidden="true" />
+          <img className="text-card-read-icon text-card-read-icon--hover text-card-read-icon--dark" src={resumeButtonDarkHoverSrc} alt="" aria-hidden="true" />
         </button>
 
         <button
@@ -141,7 +153,10 @@ export default function TextCard({
           aria-label={`${viewSegmentsLabel} for "${t.title}"`}
           title={viewSegmentsLabel}
         >
-          <img className="text-card-contents-icon" src={viewContentTileSrc} alt="" aria-hidden="true" />
+          <img className="text-card-contents-icon text-card-contents-icon--idle text-card-contents-icon--light" src={viewContentTileSrc} alt="" aria-hidden="true" />
+          <img className="text-card-contents-icon text-card-contents-icon--hover text-card-contents-icon--light" src={viewContentHoverSrc} alt="" aria-hidden="true" />
+          <img className="text-card-contents-icon text-card-contents-icon--idle text-card-contents-icon--dark" src={viewContentDarkSrc} alt="" aria-hidden="true" />
+          <img className="text-card-contents-icon text-card-contents-icon--hover text-card-contents-icon--dark" src={viewContentDarkHoverSrc} alt="" aria-hidden="true" />
         </button>
       </div>
 
@@ -177,7 +192,10 @@ export default function TextCard({
           title="Delete"
           disabled={removing}
         >
-          <img className="text-card-delete-icon" src={deleteButtonSrc} alt="" aria-hidden="true" />
+          <img className="text-card-delete-icon text-card-delete-icon--idle text-card-delete-icon--light" src={deleteButtonSrc} alt="" aria-hidden="true" />
+          <img className="text-card-delete-icon text-card-delete-icon--hover text-card-delete-icon--light" src={deleteButtonHoverSrc} alt="" aria-hidden="true" />
+          <img className="text-card-delete-icon text-card-delete-icon--idle text-card-delete-icon--dark" src={deleteButtonDarkSrc} alt="" aria-hidden="true" />
+          <img className="text-card-delete-icon text-card-delete-icon--hover text-card-delete-icon--dark" src={deleteButtonDarkHoverSrc} alt="" aria-hidden="true" />
         </button>
       </div>
     </li>

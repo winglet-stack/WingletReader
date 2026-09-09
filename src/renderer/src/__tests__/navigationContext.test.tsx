@@ -30,10 +30,15 @@ describe('NavigationContext', () => {
     expect(result.current.view).toBe('add-chapter')
   })
 
-  it('redirects alpha dead routes to the Library', () => {
+  // ADR-0006 is unchanged: this context holds route *state*. Liveness is route
+  // *policy* and lives in the route table, resolved once where the shell reads
+  // it — so setView stores what it is given and rewrites nothing.
+  it('stores the token it is given; liveness is not re-enforced here', () => {
     const { result } = renderHook(() => useNavigation(), { wrapper })
-    act(() => result.current.setView('showcase'))
-    expect(result.current.view).toBe('library')
+    act(() => result.current.setView('transmute'))
+    expect(result.current.view).toBe('transmute')
+    act(() => result.current.setView('make-video'))
+    expect(result.current.view).toBe('make-video')
   })
 
   it('openTransmuteReaderSettings sets view=settings + settingsMode=transmute', () => {

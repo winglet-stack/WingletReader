@@ -1,39 +1,27 @@
-import type { TextRecord, WordStack } from '../types'
-import { wordOffsetAtIndex } from './readerSession'
-import { buildWordPositions, splitContentAtWord } from './wordHighlight'
+import type { StackWordIndex } from './wordIndex'
 
-const SNIPPET_WORD_COUNT = 4
-
-export function displayContentForBookmark(text: Pick<TextRecord, 'content' | 'content_display'>): string {
-  return (text.content_display ?? text.content ?? '').replace(/\f/g, '\n\n')
+/**
+ * What a bookmark draft is made of: the text the snippet is quoted from, the
+ * durable word offset it anchors to, and the label that falls out of the two.
+ *
+ * The offset lookups take a {@link StackWordIndex} rather than the stack array
+ * (`architecture-depth/08`) — the conversion is prefix-summed once per
+ * tokenization instead of re-walked per bookmark — and the snippet comes off the
+ * text index, which walks the book once instead of the two full walks this
+ * module used to make three lines apart.
+ */
+/** The durable `wordOffset` of a stack boundary — how every bookmark is written. */
+export function bookmarkWordOffsetAtIndex(index: StackWordIndex, stackIndex: number): number {
+  return index.offsetAtStack(stackIndex)
 }
 
-export function bookmarkWordOffsetAtIndex(stacks: WordStack[], stackIndex: number): number {
-  return wordOffsetAtIndex(stacks, stackIndex)
-}
-
+/** The saved reading position as a word offset; no save means the start of the text. */
 export function savedReadingPositionWordOffset(
-  stacks: WordStack[],
+  index: StackWordIndex,
   stackIndex: number | null | undefined
 ): number {
   if (stackIndex == null || stackIndex <= 0) return 0
-  return bookmarkWordOffsetAtIndex(stacks, stackIndex)
-}
-
-export function bookmarkSnippetAtWordOffset(
-  displayContent: string,
-  wordOffset: number,
-  wordCount = SNIPPET_WORD_COUNT
-): string {
-  const first = splitContentAtWord(displayContent, wordOffset)
-  if (!first) return ''
-
-  const positions = buildWordPositions(displayContent)
-  return positions
-    .slice(wordOffset, wordOffset + wordCount)
-    .map((position) => position.text)
-    .join(' ')
-    .trim()
+  return index.offsetAtStack(stackIndex)
 }
 
 export function bookmarkFallbackLabel(wordOffset: number): string {
